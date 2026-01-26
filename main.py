@@ -14,7 +14,7 @@ MONGO_URI = os.getenv("MONGO_URI")
 API_KEY = os.getenv("API_KEY")
 
 client = MongoClient(MONGO_URI)
-db = client["Cluster0"]
+db = client["cloverdb"]
 orders_collection = db["orders"]
 
 class Order(BaseModel):

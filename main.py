@@ -217,11 +217,11 @@ async def oauth_callback(code: Optional[str] = None, state: Optional[str] = None
     }
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(
-            token_url,
-            data=form,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
+        # Clover's OAuth endpoints may reject form-encoded bodies (415 Unsupported Media Type).
+        # Try JSON first (most permissive in practice), then fall back to form encoding.
+        resp = await client.post(token_url, json=form)
+        if resp.status_code == 415:
+            resp = await client.post(token_url, data=form)
 
     if resp.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"Clover token exchange failed: {resp.text}")
@@ -324,11 +324,9 @@ async def _refresh_access_token_if_needed(merchant_id: str) -> dict:
     }
 
     async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.post(
-            refresh_url,
-            data=form,
-            headers={"Content-Type": "application/x-www-form-urlencoded"},
-        )
+        resp = await client.post(refresh_url, json=form)
+        if resp.status_code == 415:
+            resp = await client.post(refresh_url, data=form)
     if resp.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"Clover refresh failed: {resp.text}")
 

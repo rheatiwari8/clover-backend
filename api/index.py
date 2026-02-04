@@ -5,14 +5,12 @@ This file exists so Vercel can route all incoming requests to a single FastAPI a
 `vercel.json` maps /(.*) -> api/index.py
 """
 
-from main import app  # FastAPI instance
+from main import app  # FastAPI (ASGI) instance
 
-# Some Vercel Python runtimes (or local emulators) may prefer a Lambda-style handler.
-# Providing this doesn't hurt if unused.
-try:
-    from mangum import Mangum
+# Important: do NOT export a `handler` symbol here.
+# Vercel's Python runtime auto-detects HTTP handlers and can misinterpret non-class
+# objects named `handler`, causing crashes like:
+#   TypeError: issubclass() arg 1 must be a class
 
-    handler = Mangum(app)
-except Exception:  # pragma: no cover
-    handler = None
+__all__ = ["app"]
 

@@ -118,6 +118,18 @@ def _b64url_decode(s: str) -> bytes:
     return base64.urlsafe_b64decode((s + pad).encode("utf-8"))
 
 
+def _try_decode_jwt_payload(token: str) -> dict:
+    """
+    Decode a JWT payload WITHOUT verifying signature.
+    Useful to extract identifiers (e.g. merchant_uuid) when Clover omits them in the response body.
+    """
+    try:
+        _hdr, payload_b64, _sig = (token or "").split(".", 2)
+        return json.loads(_b64url_decode(payload_b64).decode("utf-8"))
+    except Exception:
+        return {}
+
+
 def _sign_state(payload: dict) -> str:
     """
     Stateless OAuth 'state' value:
@@ -229,14 +241,37 @@ async def oauth_callback(code: Optional[str] = None, state: Optional[str] = None
     token = resp.json()
     access_token = token.get("access_token")
     refresh_token = token.get("refresh_token")
-    expires_in = token.get("expires_in")  # seconds
-    merchant_id = token.get("merchant_id") or token.get("merchantId")
+    # Clover responses vary by app type / platform:
+    # - Some return `expires_in` + `merchant_id`
+    # - Others return `access_token_expiration` (epoch seconds) + `merchant_uuid`
+    expires_in = token.get("expires_in")  # seconds (optional)
+    access_token_expiration = token.get("access_token_expiration")  # epoch seconds (optional)
+
+    jwt_payload = _try_decode_jwt_payload(access_token) if access_token else {}
+    merchant_id = (
+        token.get("merchant_id")
+        or token.get("merchantId")
+        or token.get("merchant_uuid")
+        or jwt_payload.get("merchant_uuid")
+        or jwt_payload.get("merchantId")
+        or jwt_payload.get("merchant_id")
+    )
 
     if not access_token or not refresh_token or not merchant_id:
-        raise HTTPException(status_code=502, detail=f"Unexpected token response: {token}")
+        raise HTTPException(
+            status_code=502,
+            detail=(
+                "Unexpected token response (missing access_token/refresh_token/merchant id). "
+                f"Keys received: {sorted(list(token.keys()))}"
+            ),
+        )
 
     now_ms = int(time.time() * 1000)
-    expires_at_ms = now_ms + int(expires_in or 0) * 1000
+    if access_token_expiration:
+        # epoch seconds -> ms
+        expires_at_ms = int(access_token_expiration) * 1000
+    else:
+        expires_at_ms = now_ms + int(expires_in or 0) * 1000
 
     _orders_table, _webhook_table, installs_table = _get_tables()
     installs_table.put_item(
@@ -333,8 +368,13 @@ async def _refresh_access_token_if_needed(merchant_id: str) -> dict:
     token = resp.json()
     access_token = token.get("access_token")
     refresh_token = token.get("refresh_token") or item.get("refreshToken")
+
     expires_in = int(token.get("expires_in") or 0)
-    new_expires_at_ms = now_ms + expires_in * 1000
+    access_token_expiration = token.get("access_token_expiration")
+    if access_token_expiration:
+        new_expires_at_ms = int(access_token_expiration) * 1000
+    else:
+        new_expires_at_ms = now_ms + expires_in * 1000
 
     _orders_table, _webhook_table, installs_table = _get_tables()
     installs_table.update_item(

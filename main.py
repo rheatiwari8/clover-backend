@@ -36,6 +36,7 @@ CLOVER_REDIRECT_URI = os.getenv("CLOVER_REDIRECT_URI")  # e.g. https://api.myapp
 # "us" (default) or "eu"
 CLOVER_REGION = (os.getenv("CLOVER_REGION") or "us").lower()
 OAUTH_STATE_SECRET = os.getenv("OAUTH_STATE_SECRET")  # required if you use /oauth/start
+FRONTEND_URL = os.getenv("FRONTEND_URL")  # optional: redirect here after successful install
 
 # Allow your Vercel frontend (and local dev) to call this API.
 # In production, replace '*' with your Vercel domain(s), e.g. "https://my-app.vercel.app"
@@ -287,7 +288,10 @@ async def oauth_callback(code: Optional[str] = None, state: Optional[str] = None
         }
     )
 
-    # In a real app, redirect to your Vercel UI (e.g., /app?merchantId=...)
+    # Redirect to your UI if configured; otherwise return JSON (handy for debugging).
+    if FRONTEND_URL:
+        base = FRONTEND_URL.rstrip("/")
+        return RedirectResponse(url=f"{base}/app?merchantId={merchant_id}", status_code=302)
     return {"success": True, "merchantId": str(merchant_id)}
 
 @app.post("/clover-webhook")  # THIS MUST MATCH EXACTLY

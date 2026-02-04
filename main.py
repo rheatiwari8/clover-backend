@@ -8,6 +8,7 @@ import hmac
 import time
 from uuid import uuid4
 from typing import Optional
+from urllib.parse import urlencode
 
 import boto3
 from botocore.exceptions import ClientError
@@ -291,7 +292,8 @@ async def oauth_callback(code: Optional[str] = None, state: Optional[str] = None
     # Redirect to your UI if configured; otherwise return JSON (handy for debugging).
     if FRONTEND_URL:
         base = FRONTEND_URL.rstrip("/")
-        return RedirectResponse(url=f"{base}/app?merchantId={merchant_id}", status_code=302)
+        qs = urlencode({"merchantId": str(merchant_id)})
+        return RedirectResponse(url=f"{base}/app?{qs}", status_code=302)
     return {"success": True, "merchantId": str(merchant_id)}
 
 @app.post("/clover-webhook")  # THIS MUST MATCH EXACTLY

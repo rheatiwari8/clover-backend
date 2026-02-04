@@ -37,9 +37,6 @@ CLOVER_REDIRECT_URI = os.getenv("CLOVER_REDIRECT_URI")  # e.g. https://api.myapp
 CLOVER_REGION = (os.getenv("CLOVER_REGION") or "us").lower()
 OAUTH_STATE_SECRET = os.getenv("OAUTH_STATE_SECRET")  # required if you use /oauth/start
 
-if not API_KEY:
-    raise RuntimeError("Missing required env var: API_KEY")
-
 # Allow your Vercel frontend (and local dev) to call this API.
 # In production, replace '*' with your Vercel domain(s), e.g. "https://my-app.vercel.app"
 app.add_middleware(
@@ -50,14 +47,35 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-_dynamodb = boto3.resource(
-    "dynamodb",
-    region_name=AWS_REGION,
-    endpoint_url=DYNAMODB_ENDPOINT_URL,
-)
-orders_table = _dynamodb.Table(DYNAMODB_ORDERS_TABLE)
-webhook_table = _dynamodb.Table(DYNAMODB_WEBHOOK_TABLE)
-installs_table = _dynamodb.Table(DYNAMODB_INSTALLS_TABLE)
+def _get_tables():
+    """
+    Lazily create DynamoDB tables.
+
+    On Vercel, missing env vars (e.g. AWS_REGION) can cause import-time crashes if we
+    initialize boto3 at module import. This function defers initialization until
+    an endpoint is called and provides a clearer error message.
+    """
+    try:
+        dynamodb = boto3.resource(
+            "dynamodb",
+            region_name=AWS_REGION,
+            endpoint_url=DYNAMODB_ENDPOINT_URL,
+        )
+        return (
+            dynamodb.Table(DYNAMODB_ORDERS_TABLE),
+            dynamodb.Table(DYNAMODB_WEBHOOK_TABLE),
+            dynamodb.Table(DYNAMODB_INSTALLS_TABLE),
+        )
+    except Exception as e:
+        # Surface a readable error to callers rather than crashing the whole function.
+        raise HTTPException(
+            status_code=500,
+            detail=(
+                "Server misconfigured for DynamoDB. "
+                "Check AWS_REGION, AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and table env vars. "
+                f"Underlying error: {type(e).__name__}: {e}"
+            ),
+        )
 
 
 def _json_safe(obj):
@@ -136,6 +154,9 @@ def _verify_state(state: str, max_age_seconds: int = 10 * 60) -> dict:
     return payload
 
 def verify_api_key(x_api_key: str = Header(None)):
+    if not API_KEY:
+        # Avoid crashing the whole app at import/startup time; fail only protected endpoints.
+        raise HTTPException(status_code=500, detail="Server misconfigured (missing API_KEY)")
     if x_api_key != API_KEY:
         raise HTTPException(status_code=403, detail="Forbidden")
     return True
@@ -217,6 +238,7 @@ async def oauth_callback(code: Optional[str] = None, state: Optional[str] = None
     now_ms = int(time.time() * 1000)
     expires_at_ms = now_ms + int(expires_in or 0) * 1000
 
+    _orders_table, _webhook_table, installs_table = _get_tables()
     installs_table.put_item(
         Item={
             "merchantId": str(merchant_id),
@@ -257,6 +279,7 @@ async def clover_webhook(request: Request):
     if possible_order_id:
         item["cloverOrderId"] = str(possible_order_id)
 
+    _orders_table, webhook_table, _installs_table = _get_tables()
     webhook_table.put_item(Item=item)
     return {"success": True}
 
@@ -265,6 +288,7 @@ def root():
     return {"message": "Backend is running"}
 
 def _get_install(merchant_id: str) -> dict:
+    _orders_table, _webhook_table, installs_table = _get_tables()
     resp = installs_table.get_item(Key={"merchantId": merchant_id})
     item = resp.get("Item")
     if not item:
@@ -314,6 +338,7 @@ async def _refresh_access_token_if_needed(merchant_id: str) -> dict:
     expires_in = int(token.get("expires_in") or 0)
     new_expires_at_ms = now_ms + expires_in * 1000
 
+    _orders_table, _webhook_table, installs_table = _get_tables()
     installs_table.update_item(
         Key={"merchantId": merchant_id},
         UpdateExpression="SET accessToken=:a, refreshToken=:r, expiresAtMs=:e, updatedAtMs=:u",
@@ -358,6 +383,7 @@ def create_order(order: Order, _=Depends(verify_api_key)):
         "createdAt": order.createdAt.isoformat(),
     }
     try:
+        orders_table, _webhook_table, _installs_table = _get_tables()
         orders_table.put_item(
             Item=item,
             ConditionExpression="attribute_not_exists(cloverOrderId)",
@@ -371,6 +397,7 @@ def create_order(order: Order, _=Depends(verify_api_key)):
 
 @app.get("/orders/{order_id}")
 def get_order(order_id: str, _=Depends(verify_api_key)):
+    orders_table, _webhook_table, _installs_table = _get_tables()
     resp = orders_table.get_item(Key={"cloverOrderId": order_id})
     item = resp.get("Item")
     if not item:

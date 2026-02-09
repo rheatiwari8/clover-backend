@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 import boto3
 from botocore.exceptions import ClientError
+from boto3.dynamodb.conditions import Key
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, Header, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,6 +29,11 @@ DYNAMODB_ENDPOINT_URL = os.getenv("DYNAMODB_ENDPOINT_URL")  # optional (useful f
 DYNAMODB_ORDERS_TABLE = os.getenv("DYNAMODB_ORDERS_TABLE", "clover_orders")
 DYNAMODB_WEBHOOK_TABLE = os.getenv("DYNAMODB_WEBHOOK_TABLE", "clover_webhook_events")
 DYNAMODB_INSTALLS_TABLE = os.getenv("DYNAMODB_INSTALLS_TABLE", "clover_installs")
+# App-level multi-location config (per merchantId).
+# Create this table with:
+# - Partition key: merchantId (String)
+# - Sort key: locationId (String)
+DYNAMODB_LOCATIONS_TABLE = os.getenv("DYNAMODB_LOCATIONS_TABLE", "clover_locations")
 
 # Clover OAuth v2 (expiring access tokens + refresh tokens).
 # Docs: https://docs.clover.com/dev/docs/oauth-intro
@@ -82,6 +88,7 @@ def _get_tables():
             dynamodb.Table(DYNAMODB_ORDERS_TABLE),
             dynamodb.Table(DYNAMODB_WEBHOOK_TABLE),
             dynamodb.Table(DYNAMODB_INSTALLS_TABLE),
+            dynamodb.Table(DYNAMODB_LOCATIONS_TABLE),
         )
     except Exception as e:
         # Surface a readable error to callers rather than crashing the whole function.
@@ -112,6 +119,14 @@ class Order(BaseModel):
     cloverOrderId: str
     amount: float
     createdAt: datetime
+
+class LocationCreate(BaseModel):
+    name: str
+    locationId: Optional[str] = None  # if omitted, server generates one
+
+
+class LocationMenuUpdate(BaseModel):
+    itemIds: list[str]
 
 
 def _clover_oauth_hosts(region: str, env: str) -> tuple[str, str]:
@@ -380,7 +395,7 @@ async def oauth_callback(
     else:
         expires_at_ms = now_ms + int(expires_in or 0) * 1000
 
-    _orders_table, _webhook_table, installs_table = _get_tables()
+    _orders_table, _webhook_table, installs_table, _locations_table = _get_tables()
     installs_table.put_item(
         Item={
             "merchantId": str(merchant_id),
@@ -442,7 +457,7 @@ async def clover_webhook(request: Request):
     if possible_order_id:
         item["cloverOrderId"] = str(possible_order_id)
 
-    _orders_table, webhook_table, _installs_table = _get_tables()
+    _orders_table, webhook_table, _installs_table, _locations_table = _get_tables()
     webhook_table.put_item(Item=item)
     return {"success": True}
 
@@ -1088,7 +1103,7 @@ def menu_page(merchantId: Optional[str] = None, session: Optional[str] = None):
     return HTMLResponse(content=html, status_code=200)
 
 def _get_install(merchant_id: str) -> dict:
-    _orders_table, _webhook_table, installs_table = _get_tables()
+    _orders_table, _webhook_table, installs_table, _locations_table = _get_tables()
     resp = installs_table.get_item(Key={"merchantId": merchant_id})
     item = resp.get("Item")
     if not item:
@@ -1123,10 +1138,125 @@ def _resolve_merchant_id_for_browser_or_api(
     return merchant_id
 
 
+def _require_location_id(location_id: Optional[str]) -> str:
+    if not location_id:
+        raise HTTPException(status_code=400, detail="Missing locationId")
+    return location_id
+
+
+@app.get("/tenant/locations")
+async def list_locations(
+    merchantId: Optional[str] = None,
+    session: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    List app-defined locations for a Clover merchant (tenant).
+    """
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
+
+    resp = locations_table.query(
+        KeyConditionExpression=Key("merchantId").eq(merchant_id),
+    )
+    items = resp.get("Items") or []
+    # Only return location records (not necessarily future metadata)
+    return {"elements": [_json_safe(x) for x in items]}
+
+
+@app.post("/tenant/locations")
+async def create_location(
+    body: LocationCreate,
+    merchantId: Optional[str] = None,
+    session: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Create an app-defined location under a merchant.
+    """
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
+
+    location_id = body.locationId or str(uuid4())
+    now_ms = int(time.time() * 1000)
+    item = {
+        "merchantId": merchant_id,
+        "locationId": location_id,
+        "name": body.name,
+        "createdAtMs": Decimal(str(now_ms)),
+        "updatedAtMs": Decimal(str(now_ms)),
+    }
+    locations_table.put_item(
+        Item=item,
+        ConditionExpression="attribute_not_exists(merchantId) AND attribute_not_exists(locationId)",
+    )
+    return _json_safe(item)
+
+
+@app.get("/tenant/locations/{location_id}")
+async def get_location(
+    location_id: str,
+    merchantId: Optional[str] = None,
+    session: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None),
+):
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
+    resp = locations_table.get_item(Key={"merchantId": merchant_id, "locationId": location_id})
+    item = resp.get("Item")
+    if not item:
+        raise HTTPException(status_code=404, detail="Location not found")
+    return _json_safe(item)
+
+
+@app.put("/tenant/locations/{location_id}/menu")
+async def set_location_menu(
+    location_id: str,
+    body: LocationMenuUpdate,
+    merchantId: Optional[str] = None,
+    session: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Set the menu allowlist for a location (list of Clover item IDs).
+    """
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
+
+    item_ids = [str(x) for x in (body.itemIds or [])]
+    now_ms = int(time.time() * 1000)
+    locations_table.update_item(
+        Key={"merchantId": merchant_id, "locationId": location_id},
+        UpdateExpression="SET itemIds=:i, updatedAtMs=:u",
+        ExpressionAttributeValues={":i": item_ids, ":u": Decimal(str(now_ms))},
+    )
+    return {"success": True, "merchantId": merchant_id, "locationId": location_id, "itemIdsCount": len(item_ids)}
+
+
+@app.get("/tenant/locations/{location_id}/menu")
+async def get_location_menu(
+    location_id: str,
+    merchantId: Optional[str] = None,
+    session: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Get the menu allowlist for a location.
+    """
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
+    resp = locations_table.get_item(Key={"merchantId": merchant_id, "locationId": location_id})
+    item = resp.get("Item")
+    if not item:
+        raise HTTPException(status_code=404, detail="Location not found")
+    return {"merchantId": merchant_id, "locationId": location_id, "itemIds": item.get("itemIds") or []}
+
+
 @app.get("/clover/menu/items")
 async def clover_menu_items(
     merchantId: Optional[str] = None,
     session: Optional[str] = None,
+    locationId: Optional[str] = None,
     limit: int = 100,
     cursor: Optional[str] = None,
     x_api_key: Optional[str] = Header(None),
@@ -1145,6 +1275,17 @@ async def clover_menu_items(
     )
     access_token = str(install.get("accessToken"))
 
+    # If a locationId is specified, filter items by the app-defined allowlist for that location.
+    allowlist: Optional[set[str]] = None
+    if locationId:
+        _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
+        loc = locations_table.get_item(Key={"merchantId": merchant_id, "locationId": locationId}).get("Item")
+        if not loc:
+            raise HTTPException(status_code=404, detail="Location not found")
+        ids = loc.get("itemIds") or []
+        if ids:
+            allowlist = {str(x) for x in ids}
+
     params = {"limit": max(1, min(int(limit), 1000))}
     if cursor:
         params["cursor"] = cursor
@@ -1154,7 +1295,14 @@ async def clover_menu_items(
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params)
     if resp.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"Clover API error: {resp.text}")
-    return resp.json()
+    data = resp.json()
+
+    # Clover typically returns { elements: [...], cursor: "..." }
+    if allowlist is not None:
+        elements = data.get("elements") if isinstance(data, dict) else None
+        if isinstance(elements, list):
+            data["elements"] = [e for e in elements if str((e or {}).get("id")) in allowlist]
+    return data
 
 
 @app.get("/clover/menu/categories")
@@ -1236,7 +1384,7 @@ async def _refresh_access_token_if_needed(merchant_id: str) -> dict:
     else:
         new_expires_at_ms = now_ms + expires_in * 1000
 
-    _orders_table, _webhook_table, installs_table = _get_tables()
+    _orders_table, _webhook_table, installs_table, _locations_table = _get_tables()
     installs_table.update_item(
         Key={"merchantId": merchant_id},
         UpdateExpression="SET accessToken=:a, refreshToken=:r, expiresAtMs=:e, updatedAtMs=:u",
@@ -1283,7 +1431,7 @@ def create_order(order: Order, _=Depends(verify_api_key)):
         "createdAt": order.createdAt.isoformat(),
     }
     try:
-        orders_table, _webhook_table, _installs_table = _get_tables()
+        orders_table, _webhook_table, _installs_table, _locations_table = _get_tables()
         orders_table.put_item(
             Item=item,
             ConditionExpression="attribute_not_exists(cloverOrderId)",
@@ -1297,7 +1445,7 @@ def create_order(order: Order, _=Depends(verify_api_key)):
 
 @app.get("/orders/{order_id}")
 def get_order(order_id: str, _=Depends(verify_api_key)):
-    orders_table, _webhook_table, _installs_table = _get_tables()
+    orders_table, _webhook_table, _installs_table, _locations_table = _get_tables()
     resp = orders_table.get_item(Key={"cloverOrderId": order_id})
     item = resp.get("Item")
     if not item:

@@ -31,6 +31,18 @@ Create these tables in AWS DynamoDB:
   - `status` (String: `active`)
   - `updatedAtMs` (Number)
 
+### 1b) `clover_locations` (optional, for multi-location menus)
+
+If you want **tenant (merchant) → multiple locations** with different menus, create:
+
+- **Table name**: `clover_locations`
+- **Partition key**: `merchantId` (String)
+- **Sort key**: `locationId` (String)
+
+Stored fields:
+- `name` (String)
+- `itemIds` (List of Clover item IDs) — optional allowlist; if omitted/empty, location shows “all items”
+
 ### 2) `clover_orders` (example)
 
 - **Partition key**: `cloverOrderId` (String)
@@ -102,6 +114,12 @@ uvicorn main:app --reload --port 8000
   - Returns Clover inventory items (menu)
 - `GET /clover/menu/categories?session=...`
   - Returns Clover categories
+- `GET /tenant/locations?session=...`
+  - List app-defined locations for this merchant
+- `POST /tenant/locations?session=...`
+  - Create a location `{ "name": "New York" }`
+- `PUT /tenant/locations/{locationId}/menu?session=...`
+  - Set allowed Clover item IDs `{ "itemIds": ["ABC...", "DEF..."] }`
 - `GET /clover/merchants/{merchantId}`
   - Example API call to Clover; requires header `x-api-key: $API_KEY`
 - `POST /clover-webhook`
@@ -122,6 +140,7 @@ uvicorn main:app --reload --port 8000
 - `DYNAMODB_INSTALLS_TABLE` (e.g. `clover_installs`)
 - `DYNAMODB_ORDERS_TABLE` (e.g. `clover_orders`)
 - `DYNAMODB_WEBHOOK_TABLE` (e.g. `clover_webhook_events`)
+- `DYNAMODB_LOCATIONS_TABLE` (e.g. `clover_locations`) if using locations
 - `CLOVER_CLIENT_ID`
 - `CLOVER_CLIENT_SECRET`
 - `CLOVER_REDIRECT_URI` = `https://YOUR_VERCEL_PROJECT.vercel.app/oauth/callback`

@@ -37,8 +37,14 @@ CLOVER_REDIRECT_URI = os.getenv("CLOVER_REDIRECT_URI")  # e.g. https://api.myapp
 # "prod" (default) or "sandbox"
 CLOVER_ENV = (os.getenv("CLOVER_ENV") or "prod").lower()
 # Optional overrides (useful if Clover changes hosts or you want full control).
+# - CLOVER_AUTHORIZE_HOST: where the merchant is sent for consent (OAuth authorize UI)
+# - CLOVER_OAUTH_HOST: where the backend exchanges/refreshes tokens
+# - CLOVER_REST_HOST: where the backend calls REST v3 endpoints (items, categories, etc)
+#
+# Back-compat: CLOVER_API_HOST is treated as CLOVER_OAUTH_HOST.
 CLOVER_AUTHORIZE_HOST = os.getenv("CLOVER_AUTHORIZE_HOST")
-CLOVER_API_HOST = os.getenv("CLOVER_API_HOST")
+CLOVER_OAUTH_HOST = os.getenv("CLOVER_OAUTH_HOST") or os.getenv("CLOVER_API_HOST")
+CLOVER_REST_HOST = os.getenv("CLOVER_REST_HOST")
 # "us" (default) or "eu"
 CLOVER_REGION = (os.getenv("CLOVER_REGION") or "us").lower()
 OAUTH_STATE_SECRET = os.getenv("OAUTH_STATE_SECRET")  # required if you use /oauth/start
@@ -108,9 +114,9 @@ class Order(BaseModel):
     createdAt: datetime
 
 
-def _clover_hosts(region: str, env: str) -> tuple[str, str]:
+def _clover_oauth_hosts(region: str, env: str) -> tuple[str, str]:
     """
-    Returns (authorize_host, api_host) for the given Clover region and environment.
+    Returns (authorize_host, oauth_host) for the given Clover region and environment.
 
     Environment:
     - prod:    www/api
@@ -120,8 +126,8 @@ def _clover_hosts(region: str, env: str) -> tuple[str, str]:
     - us (default)
     - eu
     """
-    if CLOVER_AUTHORIZE_HOST and CLOVER_API_HOST:
-        return CLOVER_AUTHORIZE_HOST.rstrip("/"), CLOVER_API_HOST.rstrip("/")
+    if CLOVER_AUTHORIZE_HOST and CLOVER_OAUTH_HOST:
+        return CLOVER_AUTHORIZE_HOST.rstrip("/"), CLOVER_OAUTH_HOST.rstrip("/")
 
     r = (region or "us").lower()
     e = (env or "prod").lower()
@@ -135,6 +141,27 @@ def _clover_hosts(region: str, env: str) -> tuple[str, str]:
     if r == "eu":
         return "https://www.eu.clover.com", "https://api.eu.clover.com"
     return "https://www.clover.com", "https://api.clover.com"
+
+
+def _clover_rest_host(region: str, env: str) -> str:
+    """
+    REST v3 base host.
+
+    Observed behavior:
+    - Sandbox UI + some REST calls use `https://sandbox.dev.clover.com/v3/...`
+    - OAuth token/refresh uses `https://apisandbox.dev.clover.com/oauth/v2/...`
+
+    If this ever changes, set CLOVER_REST_HOST explicitly.
+    """
+    if CLOVER_REST_HOST:
+        return CLOVER_REST_HOST.rstrip("/")
+    r = (region or "us").lower()
+    e = (env or "prod").lower()
+    if e == "sandbox":
+        return "https://sandbox.dev.clover.com"
+    if r == "eu":
+        return "https://api.eu.clover.com"
+    return "https://api.clover.com"
 
 
 def _b64url_encode(raw: bytes) -> str:
@@ -249,7 +276,7 @@ def oauth_start():
     if not CLOVER_REDIRECT_URI:
         raise HTTPException(status_code=500, detail="Missing CLOVER_REDIRECT_URI")
 
-    authorize_host, _api_host = _clover_hosts(CLOVER_REGION, CLOVER_ENV)
+    authorize_host, _oauth_host = _clover_oauth_hosts(CLOVER_REGION, CLOVER_ENV)
     nonce = _b64url_encode(os.urandom(16))
     state = _sign_state(
         {"iat": int(time.time()), "nonce": nonce, "region": CLOVER_REGION, "env": CLOVER_ENV}
@@ -285,9 +312,10 @@ async def oauth_callback(
     state_payload = _verify_state(state)
     region = (state_payload.get("region") or CLOVER_REGION or "us").lower()
     env = (state_payload.get("env") or CLOVER_ENV or "prod").lower()
-    _authorize_host, api_host = _clover_hosts(region, env)
+    _authorize_host, oauth_host = _clover_oauth_hosts(region, env)
+    rest_host = _clover_rest_host(region, env)
 
-    token_url = f"{api_host}/oauth/v2/token"
+    token_url = f"{oauth_host}/oauth/v2/token"
     form = {
         "client_id": CLOVER_CLIENT_ID,
         "client_secret": CLOVER_CLIENT_SECRET,
@@ -358,7 +386,8 @@ async def oauth_callback(
             "merchantId": str(merchant_id),
             "env": env,
             "region": region,
-            "apiHost": api_host,
+            "oauthHost": oauth_host,
+            "restHost": rest_host,
             "accessToken": str(access_token),
             "refreshToken": str(refresh_token),
             "expiresAtMs": Decimal(str(expires_at_ms)),
@@ -1111,16 +1140,16 @@ async def clover_menu_items(
     """
     merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
     install = await _refresh_access_token_if_needed(merchant_id)
-    api_host = install.get("apiHost") or _clover_hosts(
+    rest_host = install.get("restHost") or _clover_rest_host(
         install.get("region") or CLOVER_REGION, install.get("env") or CLOVER_ENV
-    )[1]
+    )
     access_token = str(install.get("accessToken"))
 
     params = {"limit": max(1, min(int(limit), 1000))}
     if cursor:
         params["cursor"] = cursor
 
-    url = f"{api_host}/v3/merchants/{merchant_id}/items"
+    url = f"{rest_host}/v3/merchants/{merchant_id}/items"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params)
     if resp.status_code >= 400:
@@ -1141,16 +1170,16 @@ async def clover_menu_categories(
     """
     merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
     install = await _refresh_access_token_if_needed(merchant_id)
-    api_host = install.get("apiHost") or _clover_hosts(
+    rest_host = install.get("restHost") or _clover_rest_host(
         install.get("region") or CLOVER_REGION, install.get("env") or CLOVER_ENV
-    )[1]
+    )
     access_token = str(install.get("accessToken"))
 
     params = {"limit": max(1, min(int(limit), 1000))}
     if cursor:
         params["cursor"] = cursor
 
-    url = f"{api_host}/v3/merchants/{merchant_id}/categories"
+    url = f"{rest_host}/v3/merchants/{merchant_id}/categories"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params)
     if resp.status_code >= 400:
@@ -1173,10 +1202,10 @@ async def _refresh_access_token_if_needed(merchant_id: str) -> dict:
     if not CLOVER_CLIENT_ID or not CLOVER_CLIENT_SECRET:
         raise HTTPException(status_code=500, detail="Missing CLOVER_CLIENT_ID/CLOVER_CLIENT_SECRET")
 
-    api_host = item.get("apiHost") or _clover_hosts(
+    oauth_host = item.get("oauthHost") or _clover_oauth_hosts(
         item.get("region") or CLOVER_REGION, item.get("env") or CLOVER_ENV
     )[1]
-    refresh_url = f"{api_host}/oauth/v2/refresh"
+    refresh_url = f"{oauth_host}/oauth/v2/refresh"
 
     form = {
         "client_id": CLOVER_CLIENT_ID,
@@ -1233,12 +1262,12 @@ async def get_clover_merchant(merchant_id: str, _=Depends(verify_api_key)):
     Requires x-api-key to avoid exposing your Clover tokens to the public internet.
     """
     install = await _refresh_access_token_if_needed(merchant_id)
-    api_host = install.get("apiHost") or _clover_hosts(
+    rest_host = install.get("restHost") or _clover_rest_host(
         install.get("region") or CLOVER_REGION, install.get("env") or CLOVER_ENV
-    )[1]
+    )
     access_token = str(install.get("accessToken"))
 
-    url = f"{api_host}/v3/merchants/{merchant_id}"
+    url = f"{rest_host}/v3/merchants/{merchant_id}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
     if resp.status_code >= 400:

@@ -25,6 +25,7 @@ Create these tables in AWS DynamoDB:
   - `accessToken` (String)
   - `refreshToken` (String)
   - `expiresAtMs` (Number)
+  - `env` (String: `prod` or `sandbox`)
   - `region` (String: `us` or `eu`)
   - `apiHost` (String)
   - `status` (String: `active`)
@@ -95,6 +96,12 @@ uvicorn main:app --reload --port 8000
   - Redirects to Clover OAuth consent screen
 - `GET /oauth/callback?code=...&state=...`
   - Exchanges code for tokens and stores install in DynamoDB
+- `GET /menu?session=...`
+  - Built-in menu browser + item selection/cart UI (quick way to view your Clover “test menu”)
+- `GET /clover/menu/items?session=...`
+  - Returns Clover inventory items (menu)
+- `GET /clover/menu/categories?session=...`
+  - Returns Clover categories
 - `GET /clover/merchants/{merchantId}`
   - Example API call to Clover; requires header `x-api-key: $API_KEY`
 - `POST /clover-webhook`
@@ -118,13 +125,37 @@ uvicorn main:app --reload --port 8000
 - `CLOVER_CLIENT_ID`
 - `CLOVER_CLIENT_SECRET`
 - `CLOVER_REDIRECT_URI` = `https://YOUR_VERCEL_PROJECT.vercel.app/oauth/callback`
+- `CLOVER_ENV` = `sandbox` (for test merchants) or `prod`
 - `CLOVER_REGION` = `us` or `eu`
 - `OAUTH_STATE_SECRET`
+- `SESSION_SECRET` (optional; defaults to `OAUTH_STATE_SECRET`)
 
 4) Deploy. Your FastAPI API will be available at:
 
 - `https://YOUR_VERCEL_PROJECT.vercel.app/`
 - `https://YOUR_VERCEL_PROJECT.vercel.app/oauth/start`
+
+## Showing Clover “test menu” items
+
+1) In Clover app permissions, enable **Inventory / Items READ** (and optionally **Categories READ**).
+
+2) If you’re using Clover sandbox/test merchants, set:
+
+- `CLOVER_ENV=sandbox`
+
+3) Reinstall the Clover app (new scopes only apply after reinstall).
+
+4) Run install:
+
+- Visit `https://YOUR_VERCEL_PROJECT.vercel.app/oauth/start`
+
+After OAuth completes you’ll be redirected to:
+
+- `https://YOUR_VERCEL_PROJECT.vercel.app/menu?session=...`
+
+That page calls:
+
+- `/clover/menu/items?session=...`
 
 ## Calling from Vercel frontend
 

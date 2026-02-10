@@ -1156,9 +1156,15 @@ async def list_locations(
     merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
     _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
 
-    resp = locations_table.query(
-        KeyConditionExpression=Key("merchantId").eq(merchant_id),
-    )
+    try:
+        resp = locations_table.query(
+            KeyConditionExpression=Key("merchantId").eq(merchant_id),
+        )
+    except ClientError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"DynamoDB query failed for locations table '{DYNAMODB_LOCATIONS_TABLE}': {e.response.get('Error')}",
+        )
     items = resp.get("Items") or []
     # Only return location records (not necessarily future metadata)
     return {"elements": [_json_safe(x) for x in items]}
@@ -1186,10 +1192,16 @@ async def create_location(
         "createdAtMs": Decimal(str(now_ms)),
         "updatedAtMs": Decimal(str(now_ms)),
     }
-    locations_table.put_item(
-        Item=item,
-        ConditionExpression="attribute_not_exists(merchantId) AND attribute_not_exists(locationId)",
-    )
+    try:
+        locations_table.put_item(
+            Item=item,
+            ConditionExpression="attribute_not_exists(merchantId) AND attribute_not_exists(locationId)",
+        )
+    except ClientError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"DynamoDB put_item failed for locations table '{DYNAMODB_LOCATIONS_TABLE}': {e.response.get('Error')}",
+        )
     return _json_safe(item)
 
 
@@ -1202,7 +1214,13 @@ async def get_location(
 ):
     merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
     _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
-    resp = locations_table.get_item(Key={"merchantId": merchant_id, "locationId": location_id})
+    try:
+        resp = locations_table.get_item(Key={"merchantId": merchant_id, "locationId": location_id})
+    except ClientError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"DynamoDB get_item failed for locations table '{DYNAMODB_LOCATIONS_TABLE}': {e.response.get('Error')}",
+        )
     item = resp.get("Item")
     if not item:
         raise HTTPException(status_code=404, detail="Location not found")
@@ -1225,11 +1243,17 @@ async def set_location_menu(
 
     item_ids = [str(x) for x in (body.itemIds or [])]
     now_ms = int(time.time() * 1000)
-    locations_table.update_item(
-        Key={"merchantId": merchant_id, "locationId": location_id},
-        UpdateExpression="SET itemIds=:i, updatedAtMs=:u",
-        ExpressionAttributeValues={":i": item_ids, ":u": Decimal(str(now_ms))},
-    )
+    try:
+        locations_table.update_item(
+            Key={"merchantId": merchant_id, "locationId": location_id},
+            UpdateExpression="SET itemIds=:i, updatedAtMs=:u",
+            ExpressionAttributeValues={":i": item_ids, ":u": Decimal(str(now_ms))},
+        )
+    except ClientError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"DynamoDB update_item failed for locations table '{DYNAMODB_LOCATIONS_TABLE}': {e.response.get('Error')}",
+        )
     return {"success": True, "merchantId": merchant_id, "locationId": location_id, "itemIdsCount": len(item_ids)}
 
 
@@ -1245,7 +1269,13 @@ async def get_location_menu(
     """
     merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
     _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
-    resp = locations_table.get_item(Key={"merchantId": merchant_id, "locationId": location_id})
+    try:
+        resp = locations_table.get_item(Key={"merchantId": merchant_id, "locationId": location_id})
+    except ClientError as e:
+        raise HTTPException(
+            status_code=500,
+            detail=f"DynamoDB get_item failed for locations table '{DYNAMODB_LOCATIONS_TABLE}': {e.response.get('Error')}",
+        )
     item = resp.get("Item")
     if not item:
         raise HTTPException(status_code=404, detail="Location not found")

@@ -207,7 +207,9 @@ def _sign_state(payload: dict) -> str:
     Payload includes iat (issued-at) and nonce.
     """
     if not OAUTH_STATE_SECRET:
-        raise RuntimeError("Missing required env var: OAUTH_STATE_SECRET")
+        # Raise an HTTPException so Vercel/FastAPI returns a useful JSON body
+        # instead of a generic "Internal Server Error".
+        raise HTTPException(status_code=500, detail="Server misconfigured (missing OAUTH_STATE_SECRET)")
     body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
     body_b64 = _b64url_encode(body)
     sig = hmac.new(OAUTH_STATE_SECRET.encode("utf-8"), body_b64.encode("utf-8"), hashlib.sha256).digest()
@@ -277,6 +279,33 @@ def verify_api_key(x_api_key: str = Header(None)):
     if x_api_key != API_KEY:
         raise HTTPException(status_code=403, detail="Forbidden")
     return True
+
+
+@app.get("/debug/config")
+def debug_config():
+    """
+    Debug helper: shows which critical env vars are present (without exposing secrets).
+    """
+    return {
+        "clover": {
+            "env": CLOVER_ENV,
+            "region": CLOVER_REGION,
+            "redirectUri": CLOVER_REDIRECT_URI,
+            "hasClientId": bool(CLOVER_CLIENT_ID),
+            "hasClientSecret": bool(CLOVER_CLIENT_SECRET),
+            "hasOauthStateSecret": bool(OAUTH_STATE_SECRET),
+            "authorizeHostOverride": CLOVER_AUTHORIZE_HOST,
+            "oauthHostOverride": CLOVER_OAUTH_HOST,
+            "restHostOverride": CLOVER_REST_HOST,
+        },
+        "aws": {
+            "region": AWS_REGION,
+            "ordersTable": DYNAMODB_ORDERS_TABLE,
+            "webhookTable": DYNAMODB_WEBHOOK_TABLE,
+            "installsTable": DYNAMODB_INSTALLS_TABLE,
+            "locationsTable": DYNAMODB_LOCATIONS_TABLE,
+        },
+    }
 
 
 @app.get("/oauth/start")

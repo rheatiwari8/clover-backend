@@ -1629,7 +1629,7 @@ async def clover_item_modifiers(
         debug_info["errors"].append(f"items/{item_id}/modifier_groups: {resp.status_code} - {error_text[:200]}")
     
     # Strategy 2: Fetch all modifier groups for merchant and check which are linked to this item
-    # Sometimes Clover stores the relationship differently
+    # Sometimes Clover stores the relationship differently - groups might have an "items" field
     all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
     debug_info["strategies_tried"].append("all_modifier_groups")
     async with httpx.AsyncClient(timeout=15.0) as client:
@@ -1638,19 +1638,33 @@ async def clover_item_modifiers(
     if all_groups_resp.status_code == 200:
         all_groups_data = all_groups_resp.json()
         all_groups = all_groups_data.get("elements") if isinstance(all_groups_data, dict) else (all_groups_data if isinstance(all_groups_data, list) else [])
+        debug_info["total_groups_found"] = len(all_groups) if isinstance(all_groups, list) else 0
         
         # Check each group to see if it's associated with this item
+        matched_groups = []
         for group in all_groups if isinstance(all_groups, list) else []:
             if not isinstance(group, dict):
                 continue
             
-            # Check if group has items array that includes our item
-            group_items = group.get("items") or group.get("itemIds") or []
+            group_id = group.get("id")
+            group_name = group.get("name")
+            
+            # Check multiple ways groups might be linked to items:
+            # 1. Group has "items" array with item objects/IDs
+            group_items = group.get("items") or group.get("itemIds") or group.get("itemList") or []
+            item_ids_in_group = []
             if isinstance(group_items, list):
                 item_ids_in_group = [str(i.get("id") if isinstance(i, dict) else i) for i in group_items]
-                if item_id in item_ids_in_group:
-                    group_id = group.get("id")
-                    # Fetch modifiers for this group
+            
+            # 2. Check if group name matches what user sees ("Flavor,Size" suggests multiple groups)
+            # For now, if no items field, we'll try fetching modifiers anyway and see what happens
+            
+            # If group is linked to this item OR if we don't have item info, try fetching modifiers
+            if item_id in item_ids_in_group or not group_items:
+                matched_groups.append({"id": group_id, "name": group_name})
+                
+                # Fetch modifiers for this group
+                if group_id:
                     modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
                     mod_params = {}
                     if locationId:
@@ -1666,6 +1680,13 @@ async def clover_item_modifiers(
                             if isinstance(modifier, dict):
                                 modifier["modifierGroup"] = group
                                 result.append(modifier)
+                    elif modifiers_resp.status_code != 404:
+                        error_text = modifiers_resp.text[:100]
+                        debug_info["errors"].append(f"Group {group_id} ({group_name}): {modifiers_resp.status_code}")
+        
+        debug_info["matched_groups"] = matched_groups
+        if result:
+            return {"elements": result, "debug": debug_info}
     
     # Strategy 3: Fetch item to check its structure
     item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"

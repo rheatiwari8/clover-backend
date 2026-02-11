@@ -1551,11 +1551,13 @@ async def clover_item_modifiers(
     item_id: str,
     merchantId: Optional[str] = None,
     session: Optional[str] = None,
+    locationId: Optional[str] = None,
     x_api_key: Optional[str] = Header(None),
 ):
     """
     Return modifiers for a specific Clover item.
     Items can have modifierGroups, and each group contains modifiers.
+    Modifiers might be location-specific, so locationId can be provided.
     """
     merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
     install = await _refresh_access_token_if_needed(merchant_id)
@@ -1564,13 +1566,48 @@ async def clover_item_modifiers(
     )
     access_token = str(install.get("accessToken"))
 
-    # Fetch modifier groups for this item
-    url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+    # Try multiple API endpoints - Clover might structure this differently
+    result = []
     
+    # Strategy 1: Fetch modifier groups for this item
+    url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"
+    params = {}
+    if locationId:
+        params["locationId"] = locationId
+    
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params if params else None)
+    
+    # If 404, try alternative endpoint structure
     if resp.status_code == 404:
-        # Item might not have modifiers, return empty
+        # Try fetching the item directly - it might have modifierGroups embedded
+        item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            item_resp = await client.get(item_url, headers={"Authorization": f"Bearer {access_token}"})
+        if item_resp.status_code == 200:
+            item_data = item_resp.json()
+            # Check if item has modifierGroups field
+            modifier_groups = item_data.get("modifierGroups") or item_data.get("modifier_groups") or []
+            if modifier_groups:
+                # Process embedded modifier groups
+                for group in modifier_groups if isinstance(modifier_groups, list) else []:
+                    group_id = group.get("id") if isinstance(group, dict) else str(group)
+                    if not group_id:
+                        continue
+                    # Fetch modifiers for this group
+                    modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"})
+                    if modifiers_resp.status_code == 200:
+                        modifiers_data = modifiers_resp.json()
+                        modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                        for modifier in modifiers:
+                            if isinstance(modifier, dict):
+                                modifier["modifierGroup"] = group
+                                result.append(modifier)
+                if result:
+                    return {"elements": result}
+        # If still no results, return empty
         return {"elements": []}
     
     if resp.status_code >= 400:
@@ -1589,7 +1626,6 @@ async def clover_item_modifiers(
     modifier_groups = modifier_groups_data.get("elements") if isinstance(modifier_groups_data, dict) else (modifier_groups_data if isinstance(modifier_groups_data, list) else [])
     
     # For each modifier group, fetch its modifiers
-    result = []
     for group in modifier_groups:
         group_id = group.get("id") if isinstance(group, dict) else str(group)
         if not group_id:
@@ -1597,8 +1633,12 @@ async def clover_item_modifiers(
         
         # Fetch modifiers for this group
         modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+        mod_params = {}
+        if locationId:
+            mod_params["locationId"] = locationId
+        
         async with httpx.AsyncClient(timeout=15.0) as client:
-            modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"})
+            modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
         
         if modifiers_resp.status_code == 200:
             modifiers_data = modifiers_resp.json()

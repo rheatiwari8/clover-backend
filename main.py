@@ -7,7 +7,7 @@ import hashlib
 import hmac
 import time
 from uuid import uuid4
-from typing import Optional
+from typing import Optional, List, Tuple
 from urllib.parse import urlencode
 
 import boto3
@@ -126,10 +126,11 @@ class LocationCreate(BaseModel):
 
 
 class LocationMenuUpdate(BaseModel):
-    itemIds: list[str]
+    # Use typing.List for compatibility with older Python runtimes (in case Vercel ignores runtime pin).
+    itemIds: List[str]
 
 
-def _clover_oauth_hosts(region: str, env: str) -> tuple[str, str]:
+def _clover_oauth_hosts(region: str, env: str) -> Tuple[str, str]:
     """
     Returns (authorize_host, oauth_host) for the given Clover region and environment.
 
@@ -281,6 +282,12 @@ def verify_api_key(x_api_key: str = Header(None)):
     return True
 
 
+@app.get("/")
+def health_check():
+    """Simple health check that doesn't touch AWS or any external services."""
+    return {"status": "ok", "message": "Backend is running"}
+
+
 @app.get("/debug/config")
 def debug_config():
     """
@@ -304,6 +311,8 @@ def debug_config():
             "webhookTable": DYNAMODB_WEBHOOK_TABLE,
             "installsTable": DYNAMODB_INSTALLS_TABLE,
             "locationsTable": DYNAMODB_LOCATIONS_TABLE,
+            "hasAccessKeyId": bool(os.getenv("AWS_ACCESS_KEY_ID")),
+            "hasSecretAccessKey": bool(os.getenv("AWS_SECRET_ACCESS_KEY")),
         },
     }
 
@@ -315,25 +324,36 @@ def oauth_start():
 
     You typically link to this from your frontend (hosted on Vercel) to initiate install/login.
     """
-    if not CLOVER_CLIENT_ID:
-        raise HTTPException(status_code=500, detail="Missing CLOVER_CLIENT_ID")
-    if not CLOVER_REDIRECT_URI:
-        raise HTTPException(status_code=500, detail="Missing CLOVER_REDIRECT_URI")
+    try:
+        if not CLOVER_CLIENT_ID:
+            raise HTTPException(status_code=500, detail="Missing CLOVER_CLIENT_ID")
+        if not CLOVER_REDIRECT_URI:
+            raise HTTPException(status_code=500, detail="Missing CLOVER_REDIRECT_URI")
+        if not OAUTH_STATE_SECRET:
+            raise HTTPException(status_code=500, detail="Missing OAUTH_STATE_SECRET")
 
-    authorize_host, _oauth_host = _clover_oauth_hosts(CLOVER_REGION, CLOVER_ENV)
-    nonce = _b64url_encode(os.urandom(16))
-    state = _sign_state(
-        {"iat": int(time.time()), "nonce": nonce, "region": CLOVER_REGION, "env": CLOVER_ENV}
-    )
+        authorize_host, _oauth_host = _clover_oauth_hosts(CLOVER_REGION, CLOVER_ENV)
+        nonce = _b64url_encode(os.urandom(16))
+        state = _sign_state(
+            {"iat": int(time.time()), "nonce": nonce, "region": CLOVER_REGION, "env": CLOVER_ENV}
+        )
 
-    params = {
-        "client_id": CLOVER_CLIENT_ID,
-        "redirect_uri": CLOVER_REDIRECT_URI,
-        "response_type": "code",
-        "state": state,
-    }
-    url = f"{authorize_host}/oauth/v2/authorize"
-    return RedirectResponse(url=f"{url}?{httpx.QueryParams(params)}", status_code=302)
+        params = {
+            "client_id": CLOVER_CLIENT_ID,
+            "redirect_uri": CLOVER_REDIRECT_URI,
+            "response_type": "code",
+            "state": state,
+        }
+        url = f"{authorize_host}/oauth/v2/authorize"
+        return RedirectResponse(url=f"{url}?{httpx.QueryParams(params)}", status_code=302)
+    except HTTPException:
+        raise
+    except Exception as e:
+        # Catch any unexpected errors (e.g. import failures, runtime errors) and surface them
+        raise HTTPException(
+            status_code=500,
+            detail=f"Unexpected error in /oauth/start: {type(e).__name__}: {str(e)}"
+        )
 
 
 @app.get("/oauth/callback")
@@ -1334,34 +1354,46 @@ async def clover_menu_items(
     )
     access_token = str(install.get("accessToken"))
 
-    # If a locationId is specified, filter items by the app-defined allowlist for that location.
-    allowlist: Optional[set[str]] = None
-    if locationId:
-        _orders_table, _webhook_table, _installs_table, locations_table = _get_tables()
-        loc = locations_table.get_item(Key={"merchantId": merchant_id, "locationId": locationId}).get("Item")
-        if not loc:
-            raise HTTPException(status_code=404, detail="Location not found")
-        ids = loc.get("itemIds") or []
-        if ids:
-            allowlist = {str(x) for x in ids}
-
     params = {"limit": max(1, min(int(limit), 1000))}
     if cursor:
         params["cursor"] = cursor
+    
+    # If locationId is specified, use Clover's native location filtering
+    # Clover API filters items by location automatically when locationId is provided
+    if locationId:
+        params["locationId"] = locationId
 
     url = f"{rest_host}/v3/merchants/{merchant_id}/items"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params)
     if resp.status_code >= 400:
         raise HTTPException(status_code=502, detail=f"Clover API error: {resp.text}")
-    data = resp.json()
+    return resp.json()
 
-    # Clover typically returns { elements: [...], cursor: "..." }
-    if allowlist is not None:
-        elements = data.get("elements") if isinstance(data, dict) else None
-        if isinstance(elements, list):
-            data["elements"] = [e for e in elements if str((e or {}).get("id")) in allowlist]
-    return data
+
+@app.get("/clover/locations")
+async def clover_locations(
+    merchantId: Optional[str] = None,
+    session: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Return Clover's native locations for a merchant.
+    These are the actual physical locations configured in Clover.
+    """
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    install = await _refresh_access_token_if_needed(merchant_id)
+    rest_host = install.get("restHost") or _clover_rest_host(
+        install.get("region") or CLOVER_REGION, install.get("env") or CLOVER_ENV
+    )
+    access_token = str(install.get("accessToken"))
+
+    url = f"{rest_host}/v3/merchants/{merchant_id}/locations"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+    if resp.status_code >= 400:
+        raise HTTPException(status_code=502, detail=f"Clover API error: {resp.text}")
+    return resp.json()
 
 
 @app.get("/clover/menu/categories")

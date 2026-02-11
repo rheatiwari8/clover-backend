@@ -1567,9 +1567,107 @@ async def clover_item_modifiers(
     access_token = str(install.get("accessToken"))
 
     result = []
-    debug_info = {"strategies_tried": [], "errors": []}
+    debug_info = {"strategies_tried": [], "errors": [], "item_keys": [], "modifier_groups_found": []}
     
-    # Strategy 1: Fetch the item directly first to see its structure
+    # Strategy 1: Fetch modifier groups for this specific item
+    url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"
+    params = {}
+    if locationId:
+        params["locationId"] = locationId
+    
+    debug_info["strategies_tried"].append(f"items/{item_id}/modifier_groups")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params if params else None)
+    
+    if resp.status_code == 200:
+        modifier_groups_data = resp.json()
+        modifier_groups = modifier_groups_data.get("elements") if isinstance(modifier_groups_data, dict) else (modifier_groups_data if isinstance(modifier_groups_data, list) else [])
+        debug_info["modifier_groups_found"] = [g.get("id") if isinstance(g, dict) else str(g) for g in modifier_groups] if modifier_groups else []
+        
+        if modifier_groups:
+            for group in modifier_groups:
+                if not isinstance(group, dict):
+                    continue
+                group_id = group.get("id")
+                group_name = group.get("name")
+                
+                # Check if modifiers are embedded in the group
+                group_modifiers = group.get("modifiers") or group.get("modifierList") or group.get("elements") or []
+                if group_modifiers and isinstance(group_modifiers, list) and len(group_modifiers) > 0:
+                    # Modifiers are embedded in the group
+                    for modifier in group_modifiers:
+                        if isinstance(modifier, dict):
+                            modifier["modifierGroup"] = group
+                            result.append(modifier)
+                elif group_id:
+                    # Fetch modifiers separately for this group
+                    modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                    mod_params = {}
+                    if locationId:
+                        mod_params["locationId"] = locationId
+                    
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+                    
+                    if modifiers_resp.status_code == 200:
+                        modifiers_data = modifiers_resp.json()
+                        modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                        for modifier in modifiers:
+                            if isinstance(modifier, dict):
+                                modifier["modifierGroup"] = group
+                                result.append(modifier)
+                    elif modifiers_resp.status_code != 404:
+                        error_text = modifiers_resp.text
+                        debug_info["errors"].append(f"Group {group_id} ({group_name}): {modifiers_resp.status_code} - {error_text[:100]}")
+            
+            if result:
+                return {"elements": result, "debug": debug_info}
+    elif resp.status_code == 404:
+        debug_info["errors"].append(f"items/{item_id}/modifier_groups returned 404")
+    else:
+        error_text = resp.text
+        debug_info["errors"].append(f"items/{item_id}/modifier_groups: {resp.status_code} - {error_text[:200]}")
+    
+    # Strategy 2: Fetch all modifier groups for merchant and check which are linked to this item
+    # Sometimes Clover stores the relationship differently
+    all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
+    debug_info["strategies_tried"].append("all_modifier_groups")
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        all_groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
+    
+    if all_groups_resp.status_code == 200:
+        all_groups_data = all_groups_resp.json()
+        all_groups = all_groups_data.get("elements") if isinstance(all_groups_data, dict) else (all_groups_data if isinstance(all_groups_data, list) else [])
+        
+        # Check each group to see if it's associated with this item
+        for group in all_groups if isinstance(all_groups, list) else []:
+            if not isinstance(group, dict):
+                continue
+            
+            # Check if group has items array that includes our item
+            group_items = group.get("items") or group.get("itemIds") or []
+            if isinstance(group_items, list):
+                item_ids_in_group = [str(i.get("id") if isinstance(i, dict) else i) for i in group_items]
+                if item_id in item_ids_in_group:
+                    group_id = group.get("id")
+                    # Fetch modifiers for this group
+                    modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                    mod_params = {}
+                    if locationId:
+                        mod_params["locationId"] = locationId
+                    
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+                    
+                    if modifiers_resp.status_code == 200:
+                        modifiers_data = modifiers_resp.json()
+                        modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                        for modifier in modifiers:
+                            if isinstance(modifier, dict):
+                                modifier["modifierGroup"] = group
+                                result.append(modifier)
+    
+    # Strategy 3: Fetch item to check its structure
     item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"
     async with httpx.AsyncClient(timeout=15.0) as client:
         item_resp = await client.get(item_url, headers={"Authorization": f"Bearer {access_token}"})
@@ -1577,93 +1675,7 @@ async def clover_item_modifiers(
     if item_resp.status_code == 200:
         item_data = item_resp.json()
         debug_info["item_keys"] = list(item_data.keys()) if isinstance(item_data, dict) else []
-        
-        # Check if item has modifierGroups embedded (common in Clover)
-        modifier_groups_embedded = item_data.get("modifierGroups") or item_data.get("modifier_groups") or item_data.get("modifierGroups") or []
-        if modifier_groups_embedded:
-            debug_info["strategies_tried"].append("embedded_modifier_groups")
-            if isinstance(modifier_groups_embedded, list) and len(modifier_groups_embedded) > 0:
-                for group in modifier_groups_embedded:
-                    if isinstance(group, dict):
-                        group_id = group.get("id")
-                        group_name = group.get("name")
-                        # Check if modifiers are also embedded in the group
-                        group_modifiers = group.get("modifiers") or group.get("modifierList") or []
-                        if group_modifiers and isinstance(group_modifiers, list):
-                            # Modifiers are embedded in the group
-                            for modifier in group_modifiers:
-                                if isinstance(modifier, dict):
-                                    modifier["modifierGroup"] = group
-                                    result.append(modifier)
-                        elif group_id:
-                            # Need to fetch modifiers separately
-                            modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
-                            mod_params = {}
-                            if locationId:
-                                mod_params["locationId"] = locationId
-                            async with httpx.AsyncClient(timeout=15.0) as client:
-                                modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
-                            if modifiers_resp.status_code == 200:
-                                modifiers_data = modifiers_resp.json()
-                                modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
-                                for modifier in modifiers:
-                                    if isinstance(modifier, dict):
-                                        modifier["modifierGroup"] = group
-                                        result.append(modifier)
-                            elif modifiers_resp.status_code != 404:
-                                debug_info["errors"].append(f"Failed to fetch modifiers for group {group_id}: {modifiers_resp.status_code}")
-                if result:
-                    return {"elements": result, "debug": debug_info}
     
-    # Strategy 2: Fetch modifier groups endpoint
-    url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"
-    params = {}
-    if locationId:
-        params["locationId"] = locationId
-    
-    debug_info["strategies_tried"].append("modifier_groups_endpoint")
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params if params else None)
-    
-    if resp.status_code == 200:
-        modifier_groups_data = resp.json()
-        modifier_groups = modifier_groups_data.get("elements") if isinstance(modifier_groups_data, dict) else (modifier_groups_data if isinstance(modifier_groups_data, list) else [])
-        
-        if modifier_groups:
-            for group in modifier_groups:
-                group_id = group.get("id") if isinstance(group, dict) else str(group)
-                if not group_id:
-                    continue
-                
-                # Fetch modifiers for this group
-                modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
-                mod_params = {}
-                if locationId:
-                    mod_params["locationId"] = locationId
-                
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
-                
-                if modifiers_resp.status_code == 200:
-                    modifiers_data = modifiers_resp.json()
-                    modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
-                    for modifier in modifiers:
-                        if isinstance(modifier, dict):
-                            modifier["modifierGroup"] = group
-                            result.append(modifier)
-                elif modifiers_resp.status_code != 404:
-                    debug_info["errors"].append(f"Failed to fetch modifiers for group {group_id}: {modifiers_resp.status_code}")
-    
-    elif resp.status_code != 404:
-        error_text = resp.text
-        try:
-            error_json = resp.json()
-            error_detail = error_json.get("message") or error_json.get("error") or error_text
-        except:
-            error_detail = error_text
-        debug_info["errors"].append(f"Modifier groups endpoint error ({resp.status_code}): {error_detail}")
-    
-    # Return result with debug info to help diagnose
     return {"elements": result, "debug": debug_info}
 
 

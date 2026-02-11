@@ -1380,6 +1380,10 @@ async def clover_locations(
     """
     Return Clover's native locations for a merchant.
     These are the actual physical locations configured in Clover.
+    
+    Note: Clover API might use different endpoints:
+    - /v3/merchants/{merchantId}/locations (most common)
+    - /v3/locations (if merchant context is in token)
     """
     merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
     install = await _refresh_access_token_if_needed(merchant_id)
@@ -1388,12 +1392,46 @@ async def clover_locations(
     )
     access_token = str(install.get("accessToken"))
 
+    # Try the standard Clover locations endpoint
     url = f"{rest_host}/v3/merchants/{merchant_id}/locations"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+    
+    # If 404, try alternative endpoint without merchantId in path
+    if resp.status_code == 404:
+        alt_url = f"{rest_host}/v3/locations"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            alt_resp = await client.get(alt_url, headers={"Authorization": f"Bearer {access_token}"})
+        if alt_resp.status_code == 200:
+            data = alt_resp.json()
+            if isinstance(data, list):
+                return {"elements": data}
+            return data
+        # If both fail, return empty list (merchant might not have locations configured)
+        return {"elements": []}
+    
     if resp.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"Clover API error: {resp.text}")
-    return resp.json()
+        # Return more detailed error for debugging
+        error_text = resp.text
+        try:
+            error_json = resp.json()
+            error_detail = error_json.get("message") or error_json.get("error") or error_text
+        except:
+            error_detail = error_text
+        raise HTTPException(
+            status_code=502, 
+            detail=f"Clover API error ({resp.status_code}): {error_detail}"
+        )
+    
+    data = resp.json()
+    # Ensure we return consistent format
+    if isinstance(data, list):
+        return {"elements": data}
+    # Clover typically returns { elements: [...] } format
+    if isinstance(data, dict) and "elements" in data:
+        return data
+    # Wrap single object or other formats
+    return {"elements": [data] if data else []}
 
 
 @app.get("/clover/menu/categories")

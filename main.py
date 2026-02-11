@@ -80,10 +80,10 @@ def _get_tables():
     """
     try:
         dynamodb = boto3.resource(
-            "dynamodb",
-            region_name=AWS_REGION,
-            endpoint_url=DYNAMODB_ENDPOINT_URL,
-        )
+    "dynamodb",
+    region_name=AWS_REGION,
+    endpoint_url=DYNAMODB_ENDPOINT_URL,
+)
         return (
             dynamodb.Table(DYNAMODB_ORDERS_TABLE),
             dynamodb.Table(DYNAMODB_WEBHOOK_TABLE),
@@ -1354,21 +1354,103 @@ async def clover_menu_items(
     )
     access_token = str(install.get("accessToken"))
 
+    # Increase limit to get more items (Clover default might be lower)
     params = {"limit": max(1, min(int(limit), 1000))}
     if cursor:
         params["cursor"] = cursor
     
-    # If locationId is specified, use Clover's native location filtering
-    # Clover API filters items by location automatically when locationId is provided
+    # Clover API: Try location-specific endpoint first if locationId is provided
+    # Some Clover APIs have /locations/{locationId}/items endpoint
     if locationId:
-        params["locationId"] = locationId
-
+        # Try location-specific items endpoint first
+        location_url = f"{rest_host}/v3/merchants/{merchant_id}/locations/{locationId}/items"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            location_resp = await client.get(location_url, headers={"Authorization": f"Bearer {access_token}"}, params=params)
+        # If location-specific endpoint works, use it
+        if location_resp.status_code == 200:
+            return location_resp.json()
+        # If 404, fall through to regular items endpoint and filter manually
+    
+    # Standard items endpoint
     url = f"{rest_host}/v3/merchants/{merchant_id}/items"
     async with httpx.AsyncClient(timeout=15.0) as client:
         resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params)
     if resp.status_code >= 400:
-        raise HTTPException(status_code=502, detail=f"Clover API error: {resp.text}")
-    return resp.json()
+        error_text = resp.text
+        try:
+            error_json = resp.json()
+            error_detail = error_json.get("message") or error_json.get("error") or error_text
+        except:
+            error_detail = error_text
+        raise HTTPException(
+            status_code=502, 
+            detail=f"Clover API error ({resp.status_code}): {error_detail}"
+        )
+    
+    data = resp.json()
+    
+    # If locationId is specified, filter items by location
+    # Items in Clover can be associated with locations in different ways.
+    # We'll try multiple strategies to match items to locations.
+    if locationId:
+        elements = data.get("elements") if isinstance(data, dict) else (data if isinstance(data, list) else [])
+        if isinstance(elements, list) and len(elements) > 0:
+            filtered = []
+            # Sample first item to understand structure (for debugging)
+            sample_item_keys = list(elements[0].keys()) if elements else []
+            
+            for item in elements:
+                matched = False
+                
+                # Strategy 1: Check if item has "locations" array field
+                item_locations = item.get("locations") or []
+                if isinstance(item_locations, list) and len(item_locations) > 0:
+                    for loc in item_locations:
+                        loc_id = loc.get("id") if isinstance(loc, dict) else str(loc)
+                        if str(loc_id) == str(locationId):
+                            filtered.append(item)
+                            matched = True
+                            break
+                
+                # Strategy 2: Check single "location" or "locationId" field
+                if not matched:
+                    item_location_id = item.get("location") or item.get("locationId")
+                    if item_location_id and str(item_location_id) == str(locationId):
+                        filtered.append(item)
+                        matched = True
+                
+                # Strategy 3: Check "itemStock" or "stock" fields that might have location associations
+                if not matched:
+                    item_stock = item.get("itemStock") or item.get("stock")
+                    if isinstance(item_stock, list):
+                        for stock in item_stock:
+                            stock_location_id = stock.get("locationId") or stock.get("location") if isinstance(stock, dict) else None
+                            if stock_location_id and str(stock_location_id) == str(locationId):
+                                filtered.append(item)
+                                matched = True
+                                break
+                
+                # Strategy 4: If no location association found, include item (might be available at all locations)
+                # This is a fallback - items without explicit location might be available everywhere
+                if not matched:
+                    # Only include if item has NO location fields at all
+                    has_any_location_field = (
+                        item.get("locations") or 
+                        item.get("location") or 
+                        item.get("locationId") or
+                        item.get("itemStock") or
+                        item.get("stock")
+                    )
+                    if not has_any_location_field:
+                        filtered.append(item)
+            
+            # Update the response with filtered items
+            if isinstance(data, dict):
+                data["elements"] = filtered
+            else:
+                data = filtered
+    
+    return data
 
 
 @app.get("/clover/locations")

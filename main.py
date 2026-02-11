@@ -1628,10 +1628,11 @@ async def clover_item_modifiers(
         error_text = resp.text
         debug_info["errors"].append(f"items/{item_id}/modifier_groups: {resp.status_code} - {error_text[:200]}")
     
-    # Strategy 2: Fetch all modifier groups for merchant and check which are linked to this item
-    # Sometimes Clover stores the relationship differently - groups might have an "items" field
+    # Strategy 2: Fetch ALL modifier groups and ALL their modifiers, then return everything
+    # This is a fallback - we'll return all modifiers and let the frontend filter if needed
+    # Sometimes Clover doesn't expose the item->modifierGroup relationship via API
     all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
-    debug_info["strategies_tried"].append("all_modifier_groups")
+    debug_info["strategies_tried"].append("all_modifier_groups_fallback")
     async with httpx.AsyncClient(timeout=15.0) as client:
         all_groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
     
@@ -1639,8 +1640,9 @@ async def clover_item_modifiers(
         all_groups_data = all_groups_resp.json()
         all_groups = all_groups_data.get("elements") if isinstance(all_groups_data, dict) else (all_groups_data if isinstance(all_groups_data, list) else [])
         debug_info["total_groups_found"] = len(all_groups) if isinstance(all_groups, list) else 0
+        debug_info["group_names"] = [g.get("name") for g in all_groups if isinstance(g, dict) and g.get("name")]
         
-        # Check each group to see if it's associated with this item
+        # Fetch modifiers for ALL groups (we'll return them all as a fallback)
         matched_groups = []
         for group in all_groups if isinstance(all_groups, list) else []:
             if not isinstance(group, dict):
@@ -1649,44 +1651,36 @@ async def clover_item_modifiers(
             group_id = group.get("id")
             group_name = group.get("name")
             
-            # Check multiple ways groups might be linked to items:
-            # 1. Group has "items" array with item objects/IDs
-            group_items = group.get("items") or group.get("itemIds") or group.get("itemList") or []
-            item_ids_in_group = []
-            if isinstance(group_items, list):
-                item_ids_in_group = [str(i.get("id") if isinstance(i, dict) else i) for i in group_items]
+            if not group_id:
+                continue
             
-            # 2. Check if group name matches what user sees ("Flavor,Size" suggests multiple groups)
-            # For now, if no items field, we'll try fetching modifiers anyway and see what happens
+            matched_groups.append({"id": group_id, "name": group_name})
             
-            # If group is linked to this item OR if we don't have item info, try fetching modifiers
-            if item_id in item_ids_in_group or not group_items:
-                matched_groups.append({"id": group_id, "name": group_name})
-                
-                # Fetch modifiers for this group
-                if group_id:
-                    modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
-                    mod_params = {}
-                    if locationId:
-                        mod_params["locationId"] = locationId
-                    
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
-                    
-                    if modifiers_resp.status_code == 200:
-                        modifiers_data = modifiers_resp.json()
-                        modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
-                        for modifier in modifiers:
-                            if isinstance(modifier, dict):
-                                modifier["modifierGroup"] = group
-                                result.append(modifier)
-                    elif modifiers_resp.status_code != 404:
-                        error_text = modifiers_resp.text[:100]
-                        debug_info["errors"].append(f"Group {group_id} ({group_name}): {modifiers_resp.status_code}")
+            # Fetch modifiers for this group
+            modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+            mod_params = {}
+            if locationId:
+                mod_params["locationId"] = locationId
+            
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+            
+            if modifiers_resp.status_code == 200:
+                modifiers_data = modifiers_resp.json()
+                modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                for modifier in modifiers:
+                    if isinstance(modifier, dict):
+                        modifier["modifierGroup"] = group
+                        result.append(modifier)
+            elif modifiers_resp.status_code != 404:
+                error_text = modifiers_resp.text[:100]
+                debug_info["errors"].append(f"Group {group_id} ({group_name}): {modifiers_resp.status_code} - {error_text}")
         
         debug_info["matched_groups"] = matched_groups
+        # Return all modifiers found (even if not explicitly linked to this item)
+        # This is a workaround since Clover API might not expose the relationship
         if result:
-            return {"elements": result, "debug": debug_info}
+            return {"elements": result, "debug": debug_info, "note": "Returned all modifiers from all groups as fallback"}
     
     # Strategy 3: Fetch item to check its structure
     item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"

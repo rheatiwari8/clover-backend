@@ -1546,6 +1546,73 @@ async def clover_menu_categories(
     return resp.json()
 
 
+@app.get("/clover/items/{item_id}/modifiers")
+async def clover_item_modifiers(
+    item_id: str,
+    merchantId: Optional[str] = None,
+    session: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Return modifiers for a specific Clover item.
+    Items can have modifierGroups, and each group contains modifiers.
+    """
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    install = await _refresh_access_token_if_needed(merchant_id)
+    rest_host = install.get("restHost") or _clover_rest_host(
+        install.get("region") or CLOVER_REGION, install.get("env") or CLOVER_ENV
+    )
+    access_token = str(install.get("accessToken"))
+
+    # Fetch modifier groups for this item
+    url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"})
+    
+    if resp.status_code == 404:
+        # Item might not have modifiers, return empty
+        return {"elements": []}
+    
+    if resp.status_code >= 400:
+        error_text = resp.text
+        try:
+            error_json = resp.json()
+            error_detail = error_json.get("message") or error_json.get("error") or error_text
+        except:
+            error_detail = error_text
+        raise HTTPException(
+            status_code=502,
+            detail=f"Clover API error ({resp.status_code}): {error_detail}"
+        )
+    
+    modifier_groups_data = resp.json()
+    modifier_groups = modifier_groups_data.get("elements") if isinstance(modifier_groups_data, dict) else (modifier_groups_data if isinstance(modifier_groups_data, list) else [])
+    
+    # For each modifier group, fetch its modifiers
+    result = []
+    for group in modifier_groups:
+        group_id = group.get("id") if isinstance(group, dict) else str(group)
+        if not group_id:
+            continue
+        
+        # Fetch modifiers for this group
+        modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"})
+        
+        if modifiers_resp.status_code == 200:
+            modifiers_data = modifiers_resp.json()
+            modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+            
+            # Add modifier group info to each modifier
+            for modifier in modifiers:
+                if isinstance(modifier, dict):
+                    modifier["modifierGroup"] = group
+                    result.append(modifier)
+    
+    return {"elements": result}
+
+
 async def _refresh_access_token_if_needed(merchant_id: str) -> dict:
     """
     Returns an install record with a valid access token (refreshing if near expiry).

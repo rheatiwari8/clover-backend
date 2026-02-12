@@ -1455,9 +1455,13 @@ async def clover_menu_items(
     if isinstance(data, list):
         result_data = {"elements": data}
     elif isinstance(data, dict) and "elements" in data:
-        result_data = data
+        result_data = data.copy()  # Make a copy so we can modify it
     else:
         result_data = {"elements": [data] if data else []}
+    
+    # Always add debug info to see if parameter was received
+    result_data["debug_checkModifiers_param"] = checkModifiers
+    result_data["debug_locationId_param"] = locationId
     
     # If checkModifiers is provided, fetch modifiers for that item
     if checkModifiers:

@@ -1338,6 +1338,7 @@ async def clover_menu_items(
     locationId: Optional[str] = None,
     limit: int = 100,
     cursor: Optional[str] = None,
+    checkModifiers: Optional[str] = None,  # Pass item ID to check its modifiers
     x_api_key: Optional[str] = Header(None),
 ):
     """
@@ -1450,7 +1451,47 @@ async def clover_menu_items(
             else:
                 data = filtered
     
-    return data
+    # Ensure we return consistent format
+    if isinstance(data, list):
+        result_data = {"elements": data}
+    elif isinstance(data, dict) and "elements" in data:
+        result_data = data
+    else:
+        result_data = {"elements": [data] if data else []}
+    
+    # If checkModifiers is provided, fetch modifiers for that item
+    if checkModifiers:
+        try:
+            modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{checkModifiers}/modifier_groups"
+            mod_params = {}
+            if locationId:
+                mod_params["locationId"] = locationId
+            
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                mod_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+            
+            if mod_resp.status_code == 200:
+                mod_data = mod_resp.json()
+                modifier_groups = mod_data.get("elements") if isinstance(mod_data, dict) else (mod_data if isinstance(mod_data, list) else [])
+                result_data["modifier_groups_for_item"] = modifier_groups
+            else:
+                result_data["modifier_groups_error"] = f"{mod_resp.status_code}: {mod_resp.text[:200]}"
+            
+            # Also check all modifier groups
+            all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                all_groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
+            
+            if all_groups_resp.status_code == 200:
+                all_groups_data = all_groups_resp.json()
+                all_groups = all_groups_data.get("elements") if isinstance(all_groups_data, dict) else (all_groups_data if isinstance(all_groups_data, list) else [])
+                result_data["all_modifier_groups"] = all_groups if isinstance(all_groups, list) else []
+            else:
+                result_data["all_modifier_groups_error"] = f"{all_groups_resp.status_code}: {all_groups_resp.text[:200]}"
+        except Exception as e:
+            result_data["modifier_check_error"] = str(e)
+    
+    return result_data
 
 
 @app.get("/clover/locations")

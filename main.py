@@ -14,7 +14,7 @@ import boto3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Request
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
@@ -1549,9 +1549,9 @@ async def clover_menu_categories(
 @app.get("/clover/items/{item_id}/modifiers")
 async def clover_item_modifiers(
     item_id: str,
-    merchantId: Optional[str] = None,
-    session: Optional[str] = None,
-    locationId: Optional[str] = None,
+    merchantId: Optional[str] = Query(None),
+    session: Optional[str] = Query(None),
+    locationId: Optional[str] = Query(None),
     x_api_key: Optional[str] = Header(None),
 ):
     """
@@ -1633,54 +1633,70 @@ async def clover_item_modifiers(
     # Sometimes Clover doesn't expose the item->modifierGroup relationship via API
     all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
     debug_info["strategies_tried"].append("all_modifier_groups_fallback")
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        all_groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
     
-    if all_groups_resp.status_code == 200:
-        all_groups_data = all_groups_resp.json()
-        all_groups = all_groups_data.get("elements") if isinstance(all_groups_data, dict) else (all_groups_data if isinstance(all_groups_data, list) else [])
-        debug_info["total_groups_found"] = len(all_groups) if isinstance(all_groups, list) else 0
-        debug_info["group_names"] = [g.get("name") for g in all_groups if isinstance(g, dict) and g.get("name")]
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            all_groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
         
-        # Fetch modifiers for ALL groups (we'll return them all as a fallback)
-        matched_groups = []
-        for group in all_groups if isinstance(all_groups, list) else []:
-            if not isinstance(group, dict):
-                continue
-            
-            group_id = group.get("id")
-            group_name = group.get("name")
-            
-            if not group_id:
-                continue
-            
-            matched_groups.append({"id": group_id, "name": group_name})
-            
-            # Fetch modifiers for this group
-            modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
-            mod_params = {}
-            if locationId:
-                mod_params["locationId"] = locationId
-            
-            async with httpx.AsyncClient(timeout=15.0) as client:
-                modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
-            
-            if modifiers_resp.status_code == 200:
-                modifiers_data = modifiers_resp.json()
-                modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
-                for modifier in modifiers:
-                    if isinstance(modifier, dict):
-                        modifier["modifierGroup"] = group
-                        result.append(modifier)
-            elif modifiers_resp.status_code != 404:
-                error_text = modifiers_resp.text[:100]
-                debug_info["errors"].append(f"Group {group_id} ({group_name}): {modifiers_resp.status_code} - {error_text}")
+        debug_info["all_groups_status"] = all_groups_resp.status_code
         
-        debug_info["matched_groups"] = matched_groups
-        # Return all modifiers found (even if not explicitly linked to this item)
-        # This is a workaround since Clover API might not expose the relationship
-        if result:
-            return {"elements": result, "debug": debug_info, "note": "Returned all modifiers from all groups as fallback"}
+        if all_groups_resp.status_code == 200:
+            all_groups_data = all_groups_resp.json()
+            all_groups = all_groups_data.get("elements") if isinstance(all_groups_data, dict) else (all_groups_data if isinstance(all_groups_data, list) else [])
+            debug_info["total_groups_found"] = len(all_groups) if isinstance(all_groups, list) else 0
+            debug_info["group_names"] = [g.get("name") for g in all_groups if isinstance(g, dict) and g.get("name")]
+            debug_info["group_ids"] = [g.get("id") for g in all_groups if isinstance(g, dict) and g.get("id")]
+            
+            # Fetch modifiers for ALL groups (we'll return them all as a fallback)
+            matched_groups = []
+            for group in all_groups if isinstance(all_groups, list) else []:
+                if not isinstance(group, dict):
+                    continue
+                
+                group_id = group.get("id")
+                group_name = group.get("name")
+                
+                if not group_id:
+                    continue
+                
+                matched_groups.append({"id": group_id, "name": group_name})
+                
+                # Fetch modifiers for this group
+                modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                mod_params = {}
+                if locationId:
+                    mod_params["locationId"] = locationId
+                
+                try:
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+                    
+                    debug_info[f"group_{group_id}_status"] = modifiers_resp.status_code
+                    
+                    if modifiers_resp.status_code == 200:
+                        modifiers_data = modifiers_resp.json()
+                        modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                        debug_info[f"group_{group_id}_modifiers_count"] = len(modifiers) if isinstance(modifiers, list) else 0
+                        for modifier in modifiers:
+                            if isinstance(modifier, dict):
+                                modifier["modifierGroup"] = group
+                                result.append(modifier)
+                    elif modifiers_resp.status_code != 404:
+                        error_text = modifiers_resp.text[:100]
+                        debug_info["errors"].append(f"Group {group_id} ({group_name}): {modifiers_resp.status_code} - {error_text}")
+                except Exception as e:
+                    debug_info["errors"].append(f"Group {group_id} ({group_name}): Exception - {str(e)}")
+            
+            debug_info["matched_groups"] = matched_groups
+            debug_info["total_modifiers_found"] = len(result)
+            # Return all modifiers found (even if not explicitly linked to this item)
+            # This is a workaround since Clover API might not expose the relationship
+            if result:
+                return {"elements": result, "debug": debug_info, "note": "Returned all modifiers from all groups as fallback"}
+        else:
+            debug_info["errors"].append(f"Failed to fetch all groups: {all_groups_resp.status_code} - {all_groups_resp.text[:200]}")
+    except Exception as e:
+        debug_info["errors"].append(f"Exception fetching all groups: {str(e)}")
     
     # Strategy 3: Fetch item to check its structure
     item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"
@@ -1691,7 +1707,183 @@ async def clover_item_modifiers(
         item_data = item_resp.json()
         debug_info["item_keys"] = list(item_data.keys()) if isinstance(item_data, dict) else []
     
+    # If we still have no results, return all modifiers we found as a fallback
+    # This way the user can at least see modifiers exist, even if not linked via API
+    if not result and debug_info.get("total_groups_found", 0) > 0:
+        debug_info["note"] = "No modifiers returned, but modifier groups exist. Check if modifiers need to be fetched differently."
+    
+    # Add comprehensive debug info to help diagnose Clover configuration
+    debug_info["clover_check"] = {
+        "total_modifier_groups_in_merchant": debug_info.get("total_groups_found", 0),
+        "modifier_group_names": debug_info.get("group_names", []),
+        "modifier_group_ids": debug_info.get("group_ids", []),
+        "total_modifiers_found": len(result),
+        "strategies_that_worked": [s for s in debug_info.get("strategies_tried", []) if "200" in str(debug_info.get("errors", [])) or len(result) > 0]
+    }
+    
     return {"elements": result, "debug": debug_info}
+
+
+@app.get("/clover/test-modifiers")
+async def clover_test_modifiers(
+    merchantId: Optional[str] = Query(None),
+    session: Optional[str] = Query(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Simple test endpoint to check if modifier groups exist in Clover.
+    This doesn't require an item ID - just shows all modifier groups.
+    """
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    install = await _refresh_access_token_if_needed(merchant_id)
+    rest_host = install.get("restHost") or _clover_rest_host(
+        install.get("region") or CLOVER_REGION, install.get("env") or CLOVER_ENV
+    )
+    access_token = str(install.get("accessToken"))
+    
+    result = {
+        "merchantId": merchant_id,
+        "status": "checking",
+        "modifier_groups": [],
+        "errors": []
+    }
+    
+    # Fetch ALL modifier groups
+    try:
+        all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
+        
+        result["clover_api_status"] = groups_resp.status_code
+        result["clover_api_url"] = all_groups_url
+        
+        if groups_resp.status_code == 200:
+            groups_data = groups_resp.json()
+            groups = groups_data.get("elements") if isinstance(groups_data, dict) else (groups_data if isinstance(groups_data, list) else [])
+            result["modifier_groups"] = groups if isinstance(groups, list) else []
+            result["status"] = "success"
+            result["total_groups"] = len(result["modifier_groups"])
+        else:
+            result["status"] = "error"
+            result["errors"].append(f"Clover API returned {groups_resp.status_code}: {groups_resp.text[:500]}")
+    except Exception as e:
+        result["status"] = "error"
+        result["errors"].append(f"Exception: {str(e)}")
+    
+    return result
+
+
+@app.get("/clover/debug/modifiers")
+async def clover_debug_modifiers(
+    merchantId: Optional[str] = None,
+    session: Optional[str] = None,
+    itemId: Optional[str] = None,
+    locationId: Optional[str] = None,
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Diagnostic endpoint to check if modifiers are actually configured in Clover.
+    This shows:
+    1. All modifier groups for the merchant
+    2. All modifiers in each group
+    3. If itemId is provided, checks if that item has modifierGroups linked
+    4. Raw Clover API responses
+    """
+    merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+    install = await _refresh_access_token_if_needed(merchant_id)
+    rest_host = install.get("restHost") or _clover_rest_host(
+        install.get("region") or CLOVER_REGION, install.get("env") or CLOVER_ENV
+    )
+    access_token = str(install.get("accessToken"))
+    
+    result = {
+        "merchantId": merchant_id,
+        "locationId": locationId,
+        "itemId": itemId,
+        "all_modifier_groups": [],
+        "all_modifiers": [],
+        "item_modifier_groups": None,
+        "item_details": None,
+        "errors": []
+    }
+    
+    # 1. Fetch ALL modifier groups for the merchant
+    try:
+        all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
+        
+        if groups_resp.status_code == 200:
+            groups_data = groups_resp.json()
+            groups = groups_data.get("elements") if isinstance(groups_data, dict) else (groups_data if isinstance(groups_data, list) else [])
+            result["all_modifier_groups"] = groups if isinstance(groups, list) else []
+            
+            # 2. Fetch modifiers for each group
+            for group in result["all_modifier_groups"]:
+                if not isinstance(group, dict):
+                    continue
+                group_id = group.get("id")
+                if not group_id:
+                    continue
+                
+                try:
+                    modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                    mod_params = {}
+                    if locationId:
+                        mod_params["locationId"] = locationId
+                    
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        mod_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+                    
+                    if mod_resp.status_code == 200:
+                        mod_data = mod_resp.json()
+                        modifiers = mod_data.get("elements") if isinstance(mod_data, dict) else (mod_data if isinstance(mod_data, list) else [])
+                        result["all_modifiers"].append({
+                            "group_id": group_id,
+                            "group_name": group.get("name"),
+                            "modifiers": modifiers if isinstance(modifiers, list) else []
+                        })
+                    else:
+                        result["errors"].append(f"Failed to fetch modifiers for group {group_id}: {mod_resp.status_code} - {mod_resp.text[:200]}")
+                except Exception as e:
+                    result["errors"].append(f"Exception fetching modifiers for group {group_id}: {str(e)}")
+        else:
+            result["errors"].append(f"Failed to fetch modifier groups: {groups_resp.status_code} - {groups_resp.text[:200]}")
+    except Exception as e:
+        result["errors"].append(f"Exception fetching modifier groups: {str(e)}")
+    
+    # 3. If itemId is provided, check if that item has modifierGroups
+    if itemId:
+        try:
+            # Check item's modifier groups
+            item_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{itemId}/modifier_groups"
+            item_params = {}
+            if locationId:
+                item_params["locationId"] = locationId
+            
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                item_groups_resp = await client.get(item_groups_url, headers={"Authorization": f"Bearer {access_token}"}, params=item_params if item_params else None)
+            
+            if item_groups_resp.status_code == 200:
+                item_groups_data = item_groups_resp.json()
+                item_groups = item_groups_data.get("elements") if isinstance(item_groups_data, dict) else (item_groups_data if isinstance(item_groups_data, list) else [])
+                result["item_modifier_groups"] = item_groups if isinstance(item_groups, list) else []
+            else:
+                result["errors"].append(f"Failed to fetch item modifier groups: {item_groups_resp.status_code} - {item_groups_resp.text[:200]}")
+            
+            # Also fetch the item itself to see its structure
+            item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{itemId}"
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                item_resp = await client.get(item_url, headers={"Authorization": f"Bearer {access_token}"})
+            
+            if item_resp.status_code == 200:
+                result["item_details"] = item_resp.json()
+            else:
+                result["errors"].append(f"Failed to fetch item details: {item_resp.status_code} - {item_resp.text[:200]}")
+        except Exception as e:
+            result["errors"].append(f"Exception checking item modifiers: {str(e)}")
+    
+    return result
 
 
 async def _refresh_access_token_if_needed(merchant_id: str) -> dict:

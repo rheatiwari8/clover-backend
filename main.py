@@ -14,7 +14,7 @@ import boto3
 from botocore.exceptions import ClientError
 from boto3.dynamodb.conditions import Key
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Request, Query, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
 from pydantic import BaseModel
@@ -1333,12 +1333,12 @@ async def get_location_menu(
 
 @app.get("/clover/menu/items")
 async def clover_menu_items(
-    merchantId: Optional[str] = None,
-    session: Optional[str] = None,
-    locationId: Optional[str] = None,
-    limit: int = 100,
-    cursor: Optional[str] = None,
-    checkModifiers: Optional[str] = None,  # Pass item ID to check its modifiers
+    merchantId: Optional[str] = Query(None),
+    session: Optional[str] = Query(None),
+    locationId: Optional[str] = Query(None),
+    limit: int = Query(100),
+    cursor: Optional[str] = Query(None),
+    checkModifiers: Optional[str] = Query(None, description="Item ID to check modifiers for"),
     x_api_key: Optional[str] = Header(None),
 ):
     """
@@ -1455,13 +1455,15 @@ async def clover_menu_items(
     if isinstance(data, list):
         result_data = {"elements": data}
     elif isinstance(data, dict) and "elements" in data:
-        result_data = data.copy()  # Make a copy so we can modify it
+        # Make a copy so we can modify it without affecting the original
+        result_data = dict(data)
     else:
         result_data = {"elements": [data] if data else []}
     
-    # Always add debug info to see if parameter was received
+    # Always add debug info to see if parameter was received (even if None)
     result_data["debug_checkModifiers_param"] = checkModifiers
     result_data["debug_locationId_param"] = locationId
+    result_data["debug_merchantId_param"] = merchantId
     
     # If checkModifiers is provided, fetch modifiers for that item
     if checkModifiers:

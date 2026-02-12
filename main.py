@@ -1362,7 +1362,7 @@ async def clover_menu_items(
     
     # Clover API: Try location-specific endpoint first if locationId is provided
     # Some Clover APIs have /locations/{locationId}/items endpoint
-    if locationId:
+    if locationId and not checkModifiers:  # Skip location-specific endpoint if checking modifiers (need all items)
         # Try location-specific items endpoint first
         location_url = f"{rest_host}/v3/merchants/{merchant_id}/locations/{locationId}/items"
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -1461,6 +1461,7 @@ async def clover_menu_items(
     
     # If checkModifiers is provided, fetch modifiers for that item
     if checkModifiers:
+        result_data["debug_checkModifiers_received"] = checkModifiers
         try:
             modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{checkModifiers}/modifier_groups"
             mod_params = {}

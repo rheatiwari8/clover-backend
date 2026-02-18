@@ -1486,14 +1486,27 @@ async def clover_menu_items(
             else:
                 data = filtered
     
-    # Ensure we return consistent format
+    # Ensure we return consistent format - FORCE debug fields to appear
     if isinstance(data, list):
-        result_data = {"elements": data}
+        result_data = {
+            "elements": data,
+            "MODIFIERS_DEBUG": "CODE_IS_RUNNING_V4",
+            "checkModifiers_param": str(checkModifiers),
+            "timestamp": time.time()
+        }
     elif isinstance(data, dict) and "elements" in data:
-        # Make a copy so we can modify it without affecting the original
+        # Make a copy and FORCE add debug fields
         result_data = dict(data)
+        result_data["MODIFIERS_DEBUG"] = "CODE_IS_RUNNING_V4"
+        result_data["checkModifiers_param"] = str(checkModifiers)
+        result_data["debug_timestamp"] = time.time()
+        result_data["debug_code_version"] = "2024-12-15-V4-FORCE"
     else:
-        result_data = {"elements": [data] if data else []}
+        result_data = {
+            "elements": [data] if data else [],
+            "MODIFIERS_DEBUG": "CODE_IS_RUNNING_V4",
+            "checkModifiers_param": str(checkModifiers)
+        }
     
     # ALWAYS add debug info - this proves the code is running
     result_data["_debug"] = debug_info

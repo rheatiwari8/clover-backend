@@ -1892,10 +1892,28 @@ async def clover_item_modifiers(
             except Exception as e:
                 debug_info["errors"].append(f"Error fetching modifiers for group {group_id}: {str(e)}")
     
-    # Strategy 2c: Fallback - ALWAYS fetch ALL modifier groups and return all modifiers
-    # This ensures modifiers are visible even when Clover API doesn't properly expose the item->modifierGroup relationship
-    # We do this as a fallback to ensure modifiers show up
+    # Strategy 2c: Fallback - Only return modifiers if we have evidence the item might have them
+    # The 405 error shows that /items/{item_id}/modifier_groups endpoint doesn't exist or doesn't support GET
+    # Since we can't verify item->modifier relationship via API, we'll be conservative:
+    # Only return all modifiers if the item structure suggests it might have modifiers
+    # Otherwise, return empty to avoid showing modifiers for items that don't have them
     if not result or len(result) == 0:
+        # Check if we have ANY evidence the item has modifier groups
+        has_evidence_of_modifiers = (
+            item_modifier_group_ids  # Found modifierGroups in item structure
+            or modifier_groups  # Found groups via Strategy 1 (even if modifiers couldn't be fetched)
+            or debug_info.get("item_has_modifier_groups", False)  # Explicitly marked as having groups
+        )
+        
+        if not has_evidence_of_modifiers:
+            # No evidence this item has modifiers - return empty instead of all modifiers
+            debug_info["fallback_skipped"] = True
+            debug_info["fallback_skip_reason"] = "No evidence item has modifier groups - returning empty to avoid showing modifiers for items without them"
+            debug_info["summary"]["why_no_modifiers"] = "Item has no modifier groups assigned in Clover (no modifierGroups field in item, and item-specific endpoint returned 405)"
+            return {"elements": [], "debug": debug_info}
+        
+        # We have some evidence - proceed with fallback but only for groups we found
+        debug_info["fallback_evidence_found"] = True
         debug_info["strategies_tried"].append("fallback_all_groups")
         debug_info["fallback_triggered"] = True
         all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"

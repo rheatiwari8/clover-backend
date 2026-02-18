@@ -1864,12 +1864,14 @@ async def clover_item_modifiers(
     # We do this as a fallback to ensure modifiers show up
     if not result or len(result) == 0:
         debug_info["strategies_tried"].append("fallback_all_groups")
+        debug_info["fallback_triggered"] = True
         all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
         try:
             async with httpx.AsyncClient(timeout=15.0) as client:
                 all_groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
             
             debug_info["all_groups_status"] = all_groups_resp.status_code
+            debug_info["all_groups_url_called"] = all_groups_url
             
             if all_groups_resp.status_code == 200:
                 all_groups_data = all_groups_resp.json()
@@ -1879,6 +1881,7 @@ async def clover_item_modifiers(
                 debug_info["group_ids"] = [g.get("id") for g in all_groups if isinstance(g, dict) and g.get("id")]
                 
                 # Fetch modifiers for ALL groups as fallback
+                modifiers_fetched_count = 0
                 for group in all_groups if isinstance(all_groups, list) else []:
                     if not isinstance(group, dict):
                         continue
@@ -1895,6 +1898,8 @@ async def clover_item_modifiers(
                         async with httpx.AsyncClient(timeout=15.0) as client:
                             modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
                         
+                        debug_info[f"group_{group_id}_modifiers_status"] = modifiers_resp.status_code
+                        
                         if modifiers_resp.status_code == 200:
                             modifiers_data = modifiers_resp.json()
                             modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
@@ -1902,10 +1907,19 @@ async def clover_item_modifiers(
                                 if isinstance(modifier, dict):
                                     modifier["modifierGroup"] = group
                                     result.append(modifier)
+                                    modifiers_fetched_count += 1
+                        else:
+                            debug_info["errors"].append(f"Group {group_id} modifiers returned {modifiers_resp.status_code}: {modifiers_resp.text[:100]}")
                     except Exception as e:
                         debug_info["errors"].append(f"Error fetching modifiers for group {group_id}: {str(e)}")
+                
+                debug_info["modifiers_fetched_in_fallback"] = modifiers_fetched_count
+            else:
+                debug_info["errors"].append(f"Failed to fetch all groups: {all_groups_resp.status_code} - {all_groups_resp.text[:200]}")
         except Exception as e:
             debug_info["errors"].append(f"Exception fetching all groups: {str(e)}")
+            import traceback
+            debug_info["exception_traceback"] = traceback.format_exc()
     
     # Strategy 3: Fetch item to check its structure and see if it has modifierGroups embedded
     item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"

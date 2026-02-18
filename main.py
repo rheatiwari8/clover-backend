@@ -288,6 +288,21 @@ def health_check():
     return {"status": "ok", "message": "Backend is running"}
 
 
+@app.get("/test-modifiers-endpoint")
+def test_modifiers_endpoint():
+    """Test endpoint to verify deployment."""
+    return {
+        "status": "ok",
+        "message": "Modifiers endpoint test",
+        "timestamp": time.time(),
+        "endpoints": {
+            "items_modifiers": "/clover/items/{item_id}/modifiers",
+            "check_modifiers": "/clover/check-modifiers",
+            "menu_items": "/clover/menu/items"
+        }
+    }
+
+
 @app.get("/debug/config")
 def debug_config():
     """
@@ -1401,13 +1416,14 @@ async def clover_menu_items(
     
     data = resp.json()
     
-    # Add debug info immediately - this will show if code is running
+    # FORCE debug info - modify the response structure to prove code is running
     if isinstance(data, dict):
-        data["_debug"] = {
-            "checkModifiers": checkModifiers,
-            "locationId": locationId,
-            "code_version": "2024-12-15-v3"
-        }
+        # Add debug immediately
+        data["_DEBUG_CODE_RUNNING"] = True
+        data["_debug_checkModifiers"] = checkModifiers
+        data["_debug_locationId"] = locationId
+        data["_debug_timestamp"] = time.time()
+        data["_debug_code_version"] = "2024-12-15-FINAL"
     
     # If locationId is specified, filter items by location
     # Items in Clover can be associated with locations in different ways.

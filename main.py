@@ -1718,11 +1718,9 @@ async def clover_item_modifiers(
         error_text = resp.text
         debug_info["errors"].append(f"items/{item_id}/modifier_groups: {resp.status_code} - {error_text[:200]}")
     
-    # Only proceed if we found evidence that this item has modifier groups
-    # This prevents showing modifiers for items that don't have them
-    if not item_modifier_group_ids and not modifier_groups:
-        debug_info["note"] = "Item has no modifier groups assigned - returning empty result"
-        return {"elements": [], "debug": debug_info}
+    # If we found modifier groups via item-specific endpoint, we definitely have modifiers
+    # If we found modifierGroups embedded in the item, we also have modifiers
+    # If neither worked, we'll try a fallback but be more careful about it
     
     # Now fetch modifiers for the groups we found
     groups_to_process = modifier_groups if modifier_groups else []

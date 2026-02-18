@@ -1789,36 +1789,67 @@ async def clover_item_modifiers(
             
             debug_info["matched_groups"] = matched_groups
             debug_info["total_modifiers_found"] = len(result)
-            # Return all modifiers found (even if not explicitly linked to this item)
-            # This is a workaround since Clover API might not expose the relationship
-            if result:
-                return {"elements": result, "debug": debug_info, "note": "Returned all modifiers from all groups as fallback"}
+            # DON'T return all modifiers as fallback - only return modifiers if they're actually linked to the item
+            # This prevents showing modifiers for items that don't have them
         else:
             debug_info["errors"].append(f"Failed to fetch all groups: {all_groups_resp.status_code} - {all_groups_resp.text[:200]}")
     except Exception as e:
         debug_info["errors"].append(f"Exception fetching all groups: {str(e)}")
     
-    # Strategy 3: Fetch item to check its structure
+    # Strategy 3: Fetch item to check its structure and see if it has modifierGroups embedded
     item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"
+    debug_info["strategies_tried"].append("fetch_item_structure")
     async with httpx.AsyncClient(timeout=15.0) as client:
         item_resp = await client.get(item_url, headers={"Authorization": f"Bearer {access_token}"})
     
     if item_resp.status_code == 200:
         item_data = item_resp.json()
         debug_info["item_keys"] = list(item_data.keys()) if isinstance(item_data, dict) else []
+        
+        # Check if item has modifierGroups embedded
+        item_modifier_groups = item_data.get("modifierGroups") or item_data.get("modifier_groups") or []
+        if item_modifier_groups and isinstance(item_modifier_groups, list) and len(item_modifier_groups) > 0:
+            debug_info["item_has_modifier_groups"] = True
+            debug_info["item_modifier_group_ids"] = [g.get("id") if isinstance(g, dict) else str(g) for g in item_modifier_groups]
+            
+            # Fetch modifiers for these specific groups
+            for group_ref in item_modifier_groups:
+                if not isinstance(group_ref, dict):
+                    continue
+                group_id = group_ref.get("id")
+                if not group_id:
+                    continue
+                
+                # Fetch modifiers for this group
+                modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                mod_params = {}
+                if locationId:
+                    mod_params["locationId"] = locationId
+                
+                try:
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+                    
+                    if modifiers_resp.status_code == 200:
+                        modifiers_data = modifiers_resp.json()
+                        modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                        for modifier in modifiers:
+                            if isinstance(modifier, dict):
+                                modifier["modifierGroup"] = group_ref
+                                result.append(modifier)
+                except Exception as e:
+                    debug_info["errors"].append(f"Error fetching modifiers for group {group_id}: {str(e)}")
+        else:
+            debug_info["item_has_modifier_groups"] = False
     
-    # If we still have no results, return all modifiers we found as a fallback
-    # This way the user can at least see modifiers exist, even if not linked via API
-    if not result and debug_info.get("total_groups_found", 0) > 0:
-        debug_info["note"] = "No modifiers returned, but modifier groups exist. Check if modifiers need to be fetched differently."
-    
-    # Add comprehensive debug info to help diagnose Clover configuration
+    # Only return modifiers if we actually found some for this item
+    # Don't return all modifiers as a fallback - that causes modifiers to show for all items
     debug_info["clover_check"] = {
         "total_modifier_groups_in_merchant": debug_info.get("total_groups_found", 0),
         "modifier_group_names": debug_info.get("group_names", []),
         "modifier_group_ids": debug_info.get("group_ids", []),
         "total_modifiers_found": len(result),
-        "strategies_that_worked": [s for s in debug_info.get("strategies_tried", []) if "200" in str(debug_info.get("errors", [])) or len(result) > 0]
+        "item_has_modifier_groups": debug_info.get("item_has_modifier_groups", False),
     }
     
     return {"elements": result, "debug": debug_info}

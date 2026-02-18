@@ -1667,7 +1667,7 @@ async def clover_item_modifiers(
     access_token = str(install.get("accessToken"))
 
     result = []
-    debug_info = {"strategies_tried": [], "errors": [], "item_keys": [], "modifier_groups_found": [], "item_has_modifier_groups": False}
+    debug_info = {"strategies_tried": [], "errors": [], "item_keys": [], "modifier_groups_found": [], "item_has_modifier_groups": False, "summary": {}}
     
     # First, fetch the item to check if it has modifierGroups assigned
     item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"
@@ -1909,6 +1909,8 @@ async def clover_item_modifiers(
             # No evidence this item has modifiers - return empty instead of all modifiers
             debug_info["fallback_skipped"] = True
             debug_info["fallback_skip_reason"] = "No evidence item has modifier groups - returning empty to avoid showing modifiers for items without them"
+            if "summary" not in debug_info:
+                debug_info["summary"] = {}
             debug_info["summary"]["why_no_modifiers"] = "Item has no modifier groups assigned in Clover (no modifierGroups field in item, and item-specific endpoint returned 405)"
             return {"elements": [], "debug": debug_info}
         

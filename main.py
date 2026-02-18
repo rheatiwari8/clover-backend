@@ -1859,10 +1859,10 @@ async def clover_item_modifiers(
             except Exception as e:
                 debug_info["errors"].append(f"Error fetching modifiers for group {group_id}: {str(e)}")
     
-    # Strategy 2c: Fallback - if we still have no modifiers, fetch ALL modifier groups and return all modifiers
-    # This is a fallback when Clover API doesn't properly expose the item->modifierGroup relationship
-    # Note: This will show all modifiers for all items, but ensures modifiers are visible
-    if not result:
+    # Strategy 2c: Fallback - ALWAYS fetch ALL modifier groups and return all modifiers
+    # This ensures modifiers are visible even when Clover API doesn't properly expose the item->modifierGroup relationship
+    # We do this as a fallback to ensure modifiers show up
+    if not result or len(result) == 0:
         debug_info["strategies_tried"].append("fallback_all_groups")
         all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
         try:

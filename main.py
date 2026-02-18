@@ -1680,17 +1680,31 @@ async def clover_item_modifiers(
     if item_resp.status_code == 200:
         item_data = item_resp.json()
         debug_info["item_keys"] = list(item_data.keys()) if isinstance(item_data, dict) else []
+        debug_info["item_fetch_status"] = "success"
+        debug_info["item_url"] = item_url
         
         # Check if item has modifierGroups embedded - this is the most reliable indicator
         item_modifier_groups = item_data.get("modifierGroups") or item_data.get("modifier_groups") or []
         if item_modifier_groups and isinstance(item_modifier_groups, list) and len(item_modifier_groups) > 0:
             debug_info["item_has_modifier_groups"] = True
+            debug_info["item_modifier_groups_found"] = len(item_modifier_groups)
             for group_ref in item_modifier_groups:
                 if isinstance(group_ref, dict) and group_ref.get("id"):
                     item_modifier_group_ids.append(group_ref.get("id"))
                 elif isinstance(group_ref, str):
                     item_modifier_group_ids.append(group_ref)
             debug_info["item_modifier_group_ids_from_item"] = item_modifier_group_ids
+        else:
+            debug_info["item_has_modifier_groups"] = False
+            debug_info["item_modifier_groups_found"] = 0
+            debug_info["item_fetch_failure_reason"] = "Item fetched successfully but no modifierGroups or modifier_groups field found in item structure"
+            # Check what fields the item actually has
+            if isinstance(item_data, dict):
+                debug_info["item_available_fields"] = list(item_data.keys())
+    else:
+        debug_info["item_fetch_status"] = "failed"
+        debug_info["item_url"] = item_url
+        debug_info["item_fetch_failure_reason"] = f"Failed to fetch item: {item_resp.status_code} - {item_resp.text[:200]}"
     
     # Strategy 1: Fetch modifier groups for this specific item via item-specific endpoint
     url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"
@@ -1707,15 +1721,28 @@ async def clover_item_modifiers(
         modifier_groups_data = resp.json()
         modifier_groups = modifier_groups_data.get("elements") if isinstance(modifier_groups_data, dict) else (modifier_groups_data if isinstance(modifier_groups_data, list) else [])
         debug_info["modifier_groups_found"] = [g.get("id") if isinstance(g, dict) else str(g) for g in modifier_groups] if modifier_groups else []
+        debug_info["strategy1_status"] = "success"
+        debug_info["strategy1_url"] = url
+        debug_info["strategy1_response_keys"] = list(modifier_groups_data.keys()) if isinstance(modifier_groups_data, dict) else "not_a_dict"
         
         # If we found groups via item-specific endpoint, use those IDs
         if modifier_groups:
             item_modifier_group_ids = [g.get("id") for g in modifier_groups if isinstance(g, dict) and g.get("id")]
             debug_info["item_has_modifier_groups"] = True
+            debug_info["strategy1_groups_count"] = len(modifier_groups)
+        else:
+            debug_info["strategy1_groups_count"] = 0
+            debug_info["strategy1_failure_reason"] = "Endpoint returned 200 but no modifier groups found"
     elif resp.status_code == 404:
+        debug_info["strategy1_status"] = "failed"
+        debug_info["strategy1_url"] = url
+        debug_info["strategy1_failure_reason"] = "Endpoint returned 404 - item may not have modifier groups or endpoint doesn't exist"
         debug_info["errors"].append(f"items/{item_id}/modifier_groups returned 404")
     else:
         error_text = resp.text
+        debug_info["strategy1_status"] = "failed"
+        debug_info["strategy1_url"] = url
+        debug_info["strategy1_failure_reason"] = f"Endpoint returned {resp.status_code}: {error_text[:200]}"
         debug_info["errors"].append(f"items/{item_id}/modifier_groups: {resp.status_code} - {error_text[:200]}")
     
     # If we found modifier groups via item-specific endpoint, we definitely have modifiers
@@ -1755,12 +1782,18 @@ async def clover_item_modifiers(
             if modifiers_resp.status_code == 200:
                 modifiers_data = modifiers_resp.json()
                 modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                debug_info[f"group_{group_id}_modifiers_fetched"] = len(modifiers) if isinstance(modifiers, list) else 0
                 for modifier in modifiers:
                     if isinstance(modifier, dict):
                         modifier["modifierGroup"] = group
                         result.append(modifier)
-            elif modifiers_resp.status_code != 404:
+            elif modifiers_resp.status_code == 404:
+                debug_info[f"group_{group_id}_modifiers_status"] = "404_not_found"
+                debug_info[f"group_{group_id}_modifiers_failure"] = f"Modifiers endpoint returned 404 for group {group_id} ({group_name})"
+            else:
                 error_text = modifiers_resp.text
+                debug_info[f"group_{group_id}_modifiers_status"] = f"error_{modifiers_resp.status_code}"
+                debug_info[f"group_{group_id}_modifiers_failure"] = f"Failed to fetch modifiers: {modifiers_resp.status_code} - {error_text[:100]}"
                 debug_info["errors"].append(f"Group {group_id} ({group_name}): {modifiers_resp.status_code} - {error_text[:100]}")
     
     # If we found modifiers, return them
@@ -1967,12 +2000,20 @@ async def clover_item_modifiers(
         else:
             debug_info["item_has_modifier_groups"] = False
     
-    # Only return modifiers if we found evidence the item has modifier groups
-    # This ensures modifiers only show for items that actually have them configured in Clover
-    debug_info["clover_check"] = {
+    # Summary of what happened
+    debug_info["summary"] = {
         "item_has_modifier_groups": debug_info.get("item_has_modifier_groups", False),
         "item_modifier_group_ids": item_modifier_group_ids,
+        "modifier_groups_found_via_strategy1": len(modifier_groups) if modifier_groups else 0,
         "total_modifiers_found": len(result),
+        "strategies_that_ran": debug_info.get("strategies_tried", []),
+        "fallback_was_used": debug_info.get("fallback_triggered", False),
+        "why_no_modifiers": (
+            "Item has no modifier groups assigned" if not debug_info.get("item_has_modifier_groups", False) and not modifier_groups
+            else "Modifier groups found but modifiers couldn't be fetched" if (modifier_groups or item_modifier_group_ids) and not result
+            else "All strategies failed - fallback returned all modifiers" if debug_info.get("fallback_triggered", False)
+            else "Modifiers found successfully"
+        )
     }
     
     return {"elements": result, "debug": debug_info}

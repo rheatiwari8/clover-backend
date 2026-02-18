@@ -1728,11 +1728,11 @@ async def clover_item_modifiers(
         error_text = resp.text
         debug_info["errors"].append(f"items/{item_id}/modifier_groups: {resp.status_code} - {error_text[:200]}")
     
-    # Strategy 2: Fetch ALL modifier groups and ALL their modifiers, then return everything
-    # This is a fallback - we'll return all modifiers and let the frontend filter if needed
-    # Sometimes Clover doesn't expose the item->modifierGroup relationship via API
+    # Strategy 2: Fetch ALL modifier groups for debugging info only
+    # DO NOT add modifiers to result here - that causes all items to show all modifiers
+    # We only use this for debug info to help diagnose Clover configuration
     all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
-    debug_info["strategies_tried"].append("all_modifier_groups_fallback")
+    debug_info["strategies_tried"].append("all_modifier_groups_debug_only")
     
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
@@ -1746,51 +1746,7 @@ async def clover_item_modifiers(
             debug_info["total_groups_found"] = len(all_groups) if isinstance(all_groups, list) else 0
             debug_info["group_names"] = [g.get("name") for g in all_groups if isinstance(g, dict) and g.get("name")]
             debug_info["group_ids"] = [g.get("id") for g in all_groups if isinstance(g, dict) and g.get("id")]
-            
-            # Fetch modifiers for ALL groups (we'll return them all as a fallback)
-            matched_groups = []
-            for group in all_groups if isinstance(all_groups, list) else []:
-                if not isinstance(group, dict):
-                    continue
-                
-                group_id = group.get("id")
-                group_name = group.get("name")
-                
-                if not group_id:
-                    continue
-                
-                matched_groups.append({"id": group_id, "name": group_name})
-                
-                # Fetch modifiers for this group
-                modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
-                mod_params = {}
-                if locationId:
-                    mod_params["locationId"] = locationId
-                
-                try:
-                    async with httpx.AsyncClient(timeout=15.0) as client:
-                        modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
-                    
-                    debug_info[f"group_{group_id}_status"] = modifiers_resp.status_code
-                    
-                    if modifiers_resp.status_code == 200:
-                        modifiers_data = modifiers_resp.json()
-                        modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
-                        debug_info[f"group_{group_id}_modifiers_count"] = len(modifiers) if isinstance(modifiers, list) else 0
-                        for modifier in modifiers:
-                            if isinstance(modifier, dict):
-                                modifier["modifierGroup"] = group
-                                result.append(modifier)
-                    elif modifiers_resp.status_code != 404:
-                        error_text = modifiers_resp.text[:100]
-                        debug_info["errors"].append(f"Group {group_id} ({group_name}): {modifiers_resp.status_code} - {error_text}")
-                except Exception as e:
-                    debug_info["errors"].append(f"Group {group_id} ({group_name}): Exception - {str(e)}")
-            
-            debug_info["matched_groups"] = matched_groups
-            debug_info["total_modifiers_found"] = len(result)
-            # DON'T return all modifiers as fallback - only return modifiers if they're actually linked to the item
-            # This prevents showing modifiers for items that don't have them
+            # NOTE: We intentionally do NOT fetch modifiers here - only return modifiers linked to the specific item
         else:
             debug_info["errors"].append(f"Failed to fetch all groups: {all_groups_resp.status_code} - {all_groups_resp.text[:200]}")
     except Exception as e:

@@ -1928,11 +1928,14 @@ async def clover_item_modifiers(
         except Exception as e:
             debug_info["errors"].append(f"Exception fetching item: {str(e)}")
         
+        item_group_id = None
+        if isinstance(item_data, dict):
+            item_group = item_data.get("itemGroup") if isinstance(item_data.get("itemGroup"), dict) else {}
+            item_group_id = item_group.get("id")
+
         # Strategy 2a: Derive modifiers through Clover itemGroup -> modifier_groups relation
         # This is an automatic workaround that does not require manual mappings.
         if not result and isinstance(item_data, dict):
-            item_group = item_data.get("itemGroup") if isinstance(item_data.get("itemGroup"), dict) else {}
-            item_group_id = item_group.get("id")
             if item_group_id:
                 debug_info["strategies_tried"].append("fetch_item_group_modifier_groups")
                 item_group_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/item_groups/{item_group_id}/modifier_groups"
@@ -1989,6 +1992,108 @@ async def clover_item_modifiers(
                     debug_info["errors"].append(f"Exception fetching itemGroup modifier groups: {str(e)}")
             else:
                 debug_info["item_group_id_missing"] = True
+
+        # Strategy 2aa: Reverse-lookup by modifier group details (expand=items,itemGroups)
+        # Some Clover setups only expose relationships on group detail payloads.
+        if not result:
+            debug_info["strategies_tried"].append("reverse_lookup_group_details")
+            matched_groups = []
+            try:
+                all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
+
+                if groups_resp.status_code == 200:
+                    groups_data = groups_resp.json()
+                    all_groups = groups_data.get("elements") if isinstance(groups_data, dict) else (groups_data if isinstance(groups_data, list) else [])
+                    for group in all_groups if isinstance(all_groups, list) else []:
+                        if not isinstance(group, dict):
+                            continue
+                        group_id = group.get("id")
+                        if not group_id:
+                            continue
+
+                        detail_urls = [
+                            f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}?expand=items,itemGroups",
+                            f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}?expand=items",
+                            f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}?expand=itemGroups",
+                        ]
+                        matched = False
+                        matched_group_payload = group
+                        for detail_url in detail_urls:
+                            try:
+                                async with httpx.AsyncClient(timeout=15.0) as client:
+                                    detail_resp = await client.get(detail_url, headers={"Authorization": f"Bearer {access_token}"})
+                                if detail_resp.status_code != 200:
+                                    continue
+                                detail = detail_resp.json()
+                                if isinstance(detail, dict):
+                                    matched_group_payload = detail
+
+                                # items refs may be list or {"elements":[...]}
+                                items_refs = detail.get("items") if isinstance(detail, dict) else []
+                                if isinstance(items_refs, dict):
+                                    items_refs = items_refs.get("elements") or []
+                                item_ids = []
+                                for ref in items_refs if isinstance(items_refs, list) else []:
+                                    if isinstance(ref, dict) and ref.get("id"):
+                                        item_ids.append(ref.get("id"))
+                                    elif isinstance(ref, str):
+                                        item_ids.append(ref)
+                                if item_id in item_ids:
+                                    matched = True
+
+                                # itemGroups refs may be list or {"elements":[...]}
+                                if not matched and item_group_id:
+                                    item_groups_refs = detail.get("itemGroups") or detail.get("item_groups") if isinstance(detail, dict) else []
+                                    if isinstance(item_groups_refs, dict):
+                                        item_groups_refs = item_groups_refs.get("elements") or []
+                                    item_group_ids = []
+                                    for ref in item_groups_refs if isinstance(item_groups_refs, list) else []:
+                                        if isinstance(ref, dict) and ref.get("id"):
+                                            item_group_ids.append(ref.get("id"))
+                                        elif isinstance(ref, str):
+                                            item_group_ids.append(ref)
+                                    if item_group_id in item_group_ids:
+                                        matched = True
+
+                                if matched:
+                                    break
+                            except Exception:
+                                continue
+
+                        if matched:
+                            matched_groups.append(matched_group_payload)
+
+                    debug_info["reverse_lookup_group_details_matched_groups"] = len(matched_groups)
+                    for group in matched_groups:
+                        group_id = group.get("id") if isinstance(group, dict) else None
+                        if not group_id:
+                            continue
+                        modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                        mod_params = {}
+                        if locationId:
+                            mod_params["locationId"] = locationId
+                        try:
+                            async with httpx.AsyncClient(timeout=15.0) as client:
+                                modifiers_resp = await client.get(
+                                    modifiers_url,
+                                    headers={"Authorization": f"Bearer {access_token}"},
+                                    params=mod_params if mod_params else None,
+                                )
+                            if modifiers_resp.status_code == 200:
+                                modifiers_data = modifiers_resp.json()
+                                modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                                for modifier in modifiers:
+                                    if isinstance(modifier, dict):
+                                        modifier["modifierGroup"] = group
+                                        result.append(modifier)
+                        except Exception as e:
+                            debug_info["errors"].append(f"Error fetching modifiers from reverse-lookup group {group_id}: {str(e)}")
+                else:
+                    debug_info["reverse_lookup_group_list_status"] = groups_resp.status_code
+            except Exception as e:
+                debug_info["errors"].append(f"Exception in reverse lookup strategy: {str(e)}")
 
         # Strategy 2b: If Strategy 1 found groups but no modifiers yet, try fetching modifiers for those groups
         # modifier_groups is initialized at the start, so we can use it directly

@@ -1905,14 +1905,15 @@ async def clover_item_modifiers(
             or debug_info.get("item_has_modifier_groups", False)  # Explicitly marked as having groups
         )
         
-        if not has_evidence_of_modifiers:
-            # No evidence this item has modifiers - return empty instead of all modifiers
-            debug_info["fallback_skipped"] = True
-            debug_info["fallback_skip_reason"] = "No evidence item has modifier groups - returning empty to avoid showing modifiers for items without them"
-            if "summary" not in debug_info:
-                debug_info["summary"] = {}
-            debug_info["summary"]["why_no_modifiers"] = "Item has no modifier groups assigned in Clover (no modifierGroups field in item, and item-specific endpoint returned 405)"
-            return {"elements": [], "debug": debug_info}
+        # Since Clover's API doesn't expose item->modifier relationships (405 error, no modifierGroups field),
+        # we can't verify which items have modifiers. As a compromise, we'll return all modifiers
+        # but note this limitation. This ensures modifiers show up for items that have them.
+        # Note: This means items without modifiers might also show modifiers, but that's a Clover API limitation.
+        debug_info["fallback_compromise"] = True
+        debug_info["fallback_reason"] = "Clover API doesn't expose item->modifier relationship (405 on item-specific endpoint, no modifierGroups in item structure). Using fallback to return all modifiers."
+        if "summary" not in debug_info:
+            debug_info["summary"] = {}
+        debug_info["summary"]["why_no_modifiers"] = "Clover API limitation: Cannot verify item-specific modifier assignment via API. Returning all modifiers as fallback."
         
         # We have some evidence - proceed with fallback but only for groups we found
         debug_info["fallback_evidence_found"] = True

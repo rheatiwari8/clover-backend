@@ -1670,41 +1670,82 @@ async def clover_item_modifiers(
     debug_info = {"strategies_tried": [], "errors": [], "item_keys": [], "modifier_groups_found": [], "item_has_modifier_groups": False, "summary": {}}
     
     # First, fetch the item to check if it has modifierGroups assigned
-    item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"
-    debug_info["strategies_tried"].append("fetch_item_first")
+    # Try multiple variations to find modifier groups
     item_modifier_group_ids = []
     
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        item_resp = await client.get(item_url, headers={"Authorization": f"Bearer {access_token}"})
+    # Strategy 0a: Try fetching item with expand parameter
+    item_url_base = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"
+    expand_variations = [
+        ("expand=modifierGroups", "expand_modifierGroups"),
+        ("expand=modifier_groups", "expand_modifier_groups"),
+        ("expand=modifiers", "expand_modifiers"),
+        ("expand=modifierGroups,modifiers", "expand_both"),
+        ("", "no_expand"),  # Try without expand as baseline
+    ]
     
-    if item_resp.status_code == 200:
-        item_data = item_resp.json()
-        debug_info["item_keys"] = list(item_data.keys()) if isinstance(item_data, dict) else []
+    item_data = None
+    item_resp = None
+    for expand_param, strategy_name in expand_variations:
+        item_url = f"{item_url_base}?{expand_param}" if expand_param else item_url_base
+        debug_info["strategies_tried"].append(f"fetch_item_{strategy_name}")
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                item_resp = await client.get(item_url, headers={"Authorization": f"Bearer {access_token}"})
+            
+            if item_resp.status_code == 200:
+                item_data = item_resp.json()
+                debug_info[f"item_fetch_{strategy_name}_status"] = "success"
+                debug_info[f"item_fetch_{strategy_name}_keys"] = list(item_data.keys()) if isinstance(item_data, dict) else []
+                
+                # Check for modifier groups in various field names
+                item_modifier_groups = (
+                    item_data.get("modifierGroups") 
+                    or item_data.get("modifier_groups")
+                    or item_data.get("modifiers")
+                    or item_data.get("modifierGroupsList")
+                    or []
+                )
+                
+                if item_modifier_groups and isinstance(item_modifier_groups, list) and len(item_modifier_groups) > 0:
+                    debug_info["item_has_modifier_groups"] = True
+                    debug_info[f"item_modifier_groups_found_via_{strategy_name}"] = len(item_modifier_groups)
+                    for group_ref in item_modifier_groups:
+                        if isinstance(group_ref, dict) and group_ref.get("id"):
+                            item_modifier_group_ids.append(group_ref.get("id"))
+                        elif isinstance(group_ref, str):
+                            item_modifier_group_ids.append(group_ref)
+                    debug_info["item_modifier_group_ids_from_item"] = item_modifier_group_ids
+                    break  # Found modifier groups, stop trying variations
+                else:
+                    debug_info[f"item_fetch_{strategy_name}_modifier_groups"] = "not_found"
+            else:
+                debug_info[f"item_fetch_{strategy_name}_status"] = f"failed_{item_resp.status_code}"
+        except Exception as e:
+            debug_info[f"item_fetch_{strategy_name}_error"] = str(e)
+    
+    # If we didn't get item_data yet, try one more time without expand
+    if item_data is None:
+        debug_info["strategies_tried"].append("fetch_item_fallback")
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            item_resp = await client.get(item_url_base, headers={"Authorization": f"Bearer {access_token}"})
+    
+    # Item fetch is now handled above in the expand variations loop
+    # Set item_fetch_status based on whether we got item_data
+    if item_data:
         debug_info["item_fetch_status"] = "success"
-        debug_info["item_url"] = item_url
-        
-        # Check if item has modifierGroups embedded - this is the most reliable indicator
-        item_modifier_groups = item_data.get("modifierGroups") or item_data.get("modifier_groups") or []
-        if item_modifier_groups and isinstance(item_modifier_groups, list) and len(item_modifier_groups) > 0:
-            debug_info["item_has_modifier_groups"] = True
-            debug_info["item_modifier_groups_found"] = len(item_modifier_groups)
-            for group_ref in item_modifier_groups:
-                if isinstance(group_ref, dict) and group_ref.get("id"):
-                    item_modifier_group_ids.append(group_ref.get("id"))
-                elif isinstance(group_ref, str):
-                    item_modifier_group_ids.append(group_ref)
-            debug_info["item_modifier_group_ids_from_item"] = item_modifier_group_ids
-        else:
+        debug_info["item_keys"] = list(item_data.keys()) if isinstance(item_data, dict) else []
+        if not item_modifier_group_ids:
             debug_info["item_has_modifier_groups"] = False
             debug_info["item_modifier_groups_found"] = 0
-            debug_info["item_fetch_failure_reason"] = "Item fetched successfully but no modifierGroups or modifier_groups field found in item structure"
-            # Check what fields the item actually has
+            debug_info["item_fetch_failure_reason"] = "Item fetched successfully but no modifierGroups or modifier_groups field found in item structure (tried multiple expand variations)"
             if isinstance(item_data, dict):
                 debug_info["item_available_fields"] = list(item_data.keys())
+    elif item_resp:
+        debug_info["item_fetch_status"] = "failed"
+        debug_info["item_fetch_failure_reason"] = f"Failed to fetch item: {item_resp.status_code} - {item_resp.text[:200]}"
     else:
         debug_info["item_fetch_status"] = "failed"
-        debug_info["item_url"] = item_url
-        debug_info["item_fetch_failure_reason"] = f"Failed to fetch item: {item_resp.status_code} - {item_resp.text[:200]}"
+        debug_info["item_fetch_failure_reason"] = "All item fetch variations failed"
     
     # Strategy 1: Fetch modifier groups for this specific item via item-specific endpoint
     url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"

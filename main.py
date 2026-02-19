@@ -1971,75 +1971,87 @@ async def clover_item_modifiers(
                 or debug_info.get("item_has_modifier_groups", False)  # Explicitly marked as having groups
             )
             
-            # Since Clover's API doesn't expose item->modifier relationships (405 error, no modifierGroups field),
-            # we can't verify which items have modifiers. As a compromise, we'll return all modifiers
-            # but note this limitation. This ensures modifiers show up for items that have them.
-            # Note: This means items without modifiers might also show modifiers, but that's a Clover API limitation.
-            debug_info["fallback_compromise"] = True
-            debug_info["fallback_reason"] = "Clover API doesn't expose item->modifier relationship (405 on item-specific endpoint, no modifierGroups in item structure). Using fallback to return all modifiers."
-            if "summary" not in debug_info:
-                debug_info["summary"] = {}
-            debug_info["summary"]["why_no_modifiers"] = "Clover API limitation: Cannot verify item-specific modifier assignment via API. Returning all modifiers as fallback."
+            debug_info["has_evidence_of_modifiers"] = has_evidence_of_modifiers
             
-            # We have some evidence - proceed with fallback but only for groups we found
-            debug_info["fallback_evidence_found"] = True
-            debug_info["strategies_tried"].append("fallback_all_groups")
-            debug_info["fallback_triggered"] = True
-            all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
-            try:
-                async with httpx.AsyncClient(timeout=15.0) as client:
-                    all_groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
+            # Only use fallback if we have evidence the item might have modifiers
+            # Otherwise, return empty to avoid showing modifiers for items that don't have them
+            if has_evidence_of_modifiers:
+                # Since Clover's API doesn't expose item->modifier relationships (405 error, no modifierGroups field),
+                # we can't verify which items have modifiers. As a compromise, we'll return all modifiers
+                # but note this limitation. This ensures modifiers show up for items that have them.
+                # Note: This means items without modifiers might also show modifiers, but that's a Clover API limitation.
+                debug_info["fallback_compromise"] = True
+                debug_info["fallback_reason"] = "Clover API doesn't expose item->modifier relationship (405 on item-specific endpoint, no modifierGroups in item structure). Using fallback to return all modifiers."
+                if "summary" not in debug_info:
+                    debug_info["summary"] = {}
+                debug_info["summary"]["why_no_modifiers"] = "Clover API limitation: Cannot verify item-specific modifier assignment via API. Returning all modifiers as fallback."
                 
-                debug_info["all_groups_status"] = all_groups_resp.status_code
-                debug_info["all_groups_url_called"] = all_groups_url
-                
-                if all_groups_resp.status_code == 200:
-                    all_groups_data = all_groups_resp.json()
-                    all_groups = all_groups_data.get("elements") if isinstance(all_groups_data, dict) else (all_groups_data if isinstance(all_groups_data, list) else [])
-                    debug_info["total_groups_found"] = len(all_groups) if isinstance(all_groups, list) else 0
-                    debug_info["group_names"] = [g.get("name") for g in all_groups if isinstance(g, dict) and g.get("name")]
-                    debug_info["group_ids"] = [g.get("id") for g in all_groups if isinstance(g, dict) and g.get("id")]
+                # We have some evidence - proceed with fallback but only for groups we found
+                debug_info["fallback_evidence_found"] = True
+                debug_info["strategies_tried"].append("fallback_all_groups")
+                debug_info["fallback_triggered"] = True
+                all_groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
+                try:
+                    async with httpx.AsyncClient(timeout=15.0) as client:
+                        all_groups_resp = await client.get(all_groups_url, headers={"Authorization": f"Bearer {access_token}"})
                     
-                    # Fetch modifiers for ALL groups as fallback
-                    modifiers_fetched_count = 0
-                    for group in all_groups if isinstance(all_groups, list) else []:
-                        if not isinstance(group, dict):
-                            continue
-                        group_id = group.get("id")
-                        if not group_id:
-                            continue
-                        
-                        modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
-                        mod_params = {}
-                        if locationId:
-                            mod_params["locationId"] = locationId
-                        
-                        try:
-                            async with httpx.AsyncClient(timeout=15.0) as client:
-                                modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
-                            
-                            debug_info[f"group_{group_id}_modifiers_status"] = modifiers_resp.status_code
-                            
-                            if modifiers_resp.status_code == 200:
-                                modifiers_data = modifiers_resp.json()
-                                modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
-                                for modifier in modifiers:
-                                    if isinstance(modifier, dict):
-                                        modifier["modifierGroup"] = group
-                                        result.append(modifier)
-                                        modifiers_fetched_count += 1
-                            else:
-                                debug_info["errors"].append(f"Group {group_id} modifiers returned {modifiers_resp.status_code}: {modifiers_resp.text[:100]}")
-                        except Exception as e:
-                            debug_info["errors"].append(f"Error fetching modifiers for group {group_id}: {str(e)}")
+                    debug_info["all_groups_status"] = all_groups_resp.status_code
+                    debug_info["all_groups_url_called"] = all_groups_url
                     
-                    debug_info["modifiers_fetched_in_fallback"] = modifiers_fetched_count
-                else:
-                    debug_info["errors"].append(f"Failed to fetch all groups: {all_groups_resp.status_code} - {all_groups_resp.text[:200]}")
-            except Exception as e:
-                debug_info["errors"].append(f"Exception fetching all groups: {str(e)}")
-                import traceback
-                debug_info["exception_traceback"] = traceback.format_exc()
+                    if all_groups_resp.status_code == 200:
+                        all_groups_data = all_groups_resp.json()
+                        all_groups = all_groups_data.get("elements") if isinstance(all_groups_data, dict) else (all_groups_data if isinstance(all_groups_data, list) else [])
+                        debug_info["total_groups_found"] = len(all_groups) if isinstance(all_groups, list) else 0
+                        debug_info["group_names"] = [g.get("name") for g in all_groups if isinstance(g, dict) and g.get("name")]
+                        debug_info["group_ids"] = [g.get("id") for g in all_groups if isinstance(g, dict) and g.get("id")]
+                        
+                        # Fetch modifiers for ALL groups as fallback
+                        modifiers_fetched_count = 0
+                        for group in all_groups if isinstance(all_groups, list) else []:
+                            if not isinstance(group, dict):
+                                continue
+                            group_id = group.get("id")
+                            if not group_id:
+                                continue
+                            
+                            modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                            mod_params = {}
+                            if locationId:
+                                mod_params["locationId"] = locationId
+                            
+                            try:
+                                async with httpx.AsyncClient(timeout=15.0) as client:
+                                    modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+                                
+                                debug_info[f"group_{group_id}_modifiers_status"] = modifiers_resp.status_code
+                                
+                                if modifiers_resp.status_code == 200:
+                                    modifiers_data = modifiers_resp.json()
+                                    modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                                    for modifier in modifiers:
+                                        if isinstance(modifier, dict):
+                                            modifier["modifierGroup"] = group
+                                            result.append(modifier)
+                                            modifiers_fetched_count += 1
+                                else:
+                                    debug_info["errors"].append(f"Group {group_id} modifiers returned {modifiers_resp.status_code}: {modifiers_resp.text[:100]}")
+                            except Exception as e:
+                                debug_info["errors"].append(f"Error fetching modifiers for group {group_id}: {str(e)}")
+                        
+                        debug_info["modifiers_fetched_in_fallback"] = modifiers_fetched_count
+                    else:
+                        debug_info["errors"].append(f"Failed to fetch all groups: {all_groups_resp.status_code} - {all_groups_resp.text[:200]}")
+                except Exception as e:
+                    debug_info["errors"].append(f"Exception fetching all groups: {str(e)}")
+                    import traceback
+                    debug_info["exception_traceback"] = traceback.format_exc()
+            else:
+                # No evidence of modifiers - return empty
+                debug_info["fallback_skipped"] = True
+                debug_info["fallback_skipped_reason"] = "No evidence found that this item has modifier groups assigned. Returning empty modifiers to avoid showing modifiers for items without them."
+                if "summary" not in debug_info:
+                    debug_info["summary"] = {}
+                debug_info["summary"]["why_no_modifiers"] = "No evidence found that this item has modifier groups. Item structure doesn't contain modifierGroups field, and no item-specific modifier groups were found via API."
         
         # Strategy 3: Fetch item to check its structure and see if it has modifierGroups embedded
         item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}"
@@ -2117,6 +2129,157 @@ async def clover_item_modifiers(
                 "merchantId": merchantId,
                 "locationId": locationId
             }
+        }
+
+
+@app.get("/clover/debug/item-modifier-relationships")
+async def clover_item_modifier_relationships(
+    merchantId: Optional[str] = Query(None),
+    session: Optional[str] = Query(None),
+    locationId: Optional[str] = Query(None),
+    x_api_key: Optional[str] = Header(None),
+):
+    """
+    Debug endpoint: Shows which items are connected to which modifiers.
+    Returns a clear mapping of item -> modifier groups -> modifiers.
+    """
+    try:
+        merchant_id = _resolve_merchant_id_for_browser_or_api(merchantId, session, x_api_key)
+        install = await _refresh_access_token_if_needed(merchant_id)
+        rest_host = install.get("restHost") or _clover_rest_host(
+            install.get("region") or CLOVER_REGION, install.get("env") or CLOVER_ENV
+        )
+        access_token = str(install.get("accessToken"))
+        
+        # Fetch all items
+        items_url = f"{rest_host}/v3/merchants/{merchant_id}/items"
+        items_params = {"limit": 100}
+        if locationId:
+            items_params["locationId"] = locationId
+        
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            items_resp = await client.get(items_url, headers={"Authorization": f"Bearer {access_token}"}, params=items_params)
+        
+        if items_resp.status_code != 200:
+            return {
+                "error": f"Failed to fetch items: {items_resp.status_code}",
+                "response": items_resp.text[:500]
+            }
+        
+        items_data = items_resp.json()
+        items = items_data.get("elements") if isinstance(items_data, dict) else (items_data if isinstance(items_data, list) else [])
+        
+        # Fetch all modifier groups
+        groups_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups"
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            groups_resp = await client.get(groups_url, headers={"Authorization": f"Bearer {access_token}"})
+        
+        all_modifier_groups = {}
+        if groups_resp.status_code == 200:
+            groups_data = groups_resp.json()
+            groups = groups_data.get("elements") if isinstance(groups_data, dict) else (groups_data if isinstance(groups_data, list) else [])
+            for group in groups if isinstance(groups, list) else []:
+                if isinstance(group, dict) and group.get("id"):
+                    all_modifier_groups[group.get("id")] = group
+        
+        # Build relationships
+        relationships = []
+        items_with_modifiers = 0
+        items_without_modifiers = 0
+        
+        for item in items if isinstance(items, list) else []:
+            if not isinstance(item, dict):
+                continue
+            
+            item_id = item.get("id")
+            item_name = item.get("name", "Unknown")
+            
+            # Try to find modifier groups for this item
+            item_modifier_groups = []
+            
+            # Strategy 1: Check if item has modifierGroups field
+            modifier_group_refs = item.get("modifierGroups") or item.get("modifier_groups") or []
+            if modifier_group_refs and isinstance(modifier_group_refs, list):
+                for group_ref in modifier_group_refs:
+                    group_id = group_ref.get("id") if isinstance(group_ref, dict) else (group_ref if isinstance(group_ref, str) else None)
+                    if group_id and group_id in all_modifier_groups:
+                        item_modifier_groups.append(all_modifier_groups[group_id])
+            
+            # Strategy 2: Try fetching item with expand parameter
+            if not item_modifier_groups:
+                try:
+                    item_url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}?expand=modifierGroups"
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        item_detail_resp = await client.get(item_url, headers={"Authorization": f"Bearer {access_token}"})
+                    if item_detail_resp.status_code == 200:
+                        item_detail = item_detail_resp.json()
+                        modifier_group_refs = item_detail.get("modifierGroups") or item_detail.get("modifier_groups") or []
+                        if modifier_group_refs and isinstance(modifier_group_refs, list):
+                            for group_ref in modifier_group_refs:
+                                group_id = group_ref.get("id") if isinstance(group_ref, dict) else (group_ref if isinstance(group_ref, str) else None)
+                                if group_id and group_id in all_modifier_groups:
+                                    item_modifier_groups.append(all_modifier_groups[group_id])
+                except:
+                    pass
+            
+            # Fetch modifiers for each group
+            modifier_details = []
+            for group in item_modifier_groups:
+                group_id = group.get("id")
+                group_name = group.get("name", "Unknown")
+                
+                # Fetch modifiers for this group
+                modifiers_url = f"{rest_host}/v3/merchants/{merchant_id}/modifier_groups/{group_id}/modifiers"
+                mod_params = {}
+                if locationId:
+                    mod_params["locationId"] = locationId
+                
+                try:
+                    async with httpx.AsyncClient(timeout=10.0) as client:
+                        modifiers_resp = await client.get(modifiers_url, headers={"Authorization": f"Bearer {access_token}"}, params=mod_params if mod_params else None)
+                    if modifiers_resp.status_code == 200:
+                        modifiers_data = modifiers_resp.json()
+                        modifiers = modifiers_data.get("elements") if isinstance(modifiers_data, dict) else (modifiers_data if isinstance(modifiers_data, list) else [])
+                        modifier_names = [m.get("name", "Unknown") for m in modifiers if isinstance(m, dict)]
+                        modifier_details.append({
+                            "group_id": group_id,
+                            "group_name": group_name,
+                            "modifiers": modifier_names,
+                            "modifier_count": len(modifiers) if isinstance(modifiers, list) else 0
+                        })
+                except:
+                    pass
+            
+            if item_modifier_groups:
+                items_with_modifiers += 1
+            else:
+                items_without_modifiers += 1
+            
+            relationships.append({
+                "item_id": item_id,
+                "item_name": item_name,
+                "has_modifiers": len(item_modifier_groups) > 0,
+                "modifier_groups": modifier_details,
+                "modifier_group_count": len(item_modifier_groups)
+            })
+        
+        return {
+            "merchant_id": merchant_id,
+            "location_id": locationId or "all",
+            "summary": {
+                "total_items": len(relationships),
+                "items_with_modifiers": items_with_modifiers,
+                "items_without_modifiers": items_without_modifiers,
+                "total_modifier_groups": len(all_modifier_groups)
+            },
+            "relationships": relationships
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "error": str(e),
+            "error_type": type(e).__name__,
+            "traceback": traceback.format_exc()
         }
 
 

@@ -1747,48 +1747,71 @@ async def clover_item_modifiers(
         debug_info["item_fetch_status"] = "failed"
         debug_info["item_fetch_failure_reason"] = "All item fetch variations failed"
     
-    # Strategy 1: Fetch modifier groups for this specific item via item-specific endpoint
-    url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"
-    params = {}
+    # Strategy 1: Try multiple variations of item-specific modifier groups endpoint
+    endpoint_variations = [
+        (f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups", "modifier_groups", {}),
+        (f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifiers", "modifiers", {}),
+        (f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifierGroups", "modifierGroups", {}),
+        (f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier-groups", "modifier-groups", {}),
+    ]
+    
+    # Add location-specific variations if locationId is provided
     if locationId:
-        params["locationId"] = locationId
+        for base_url, suffix, _ in endpoint_variations[:]:
+            endpoint_variations.append((base_url, f"{suffix}_with_location", {"locationId": locationId}))
     
-    debug_info["strategies_tried"].append(f"items/{item_id}/modifier_groups")
-    modifier_groups = []
-    async with httpx.AsyncClient(timeout=15.0) as client:
-        resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params if params else None)
+    for url, variation_name, params in endpoint_variations:
+        debug_info["strategies_tried"].append(f"items/{item_id}/{variation_name}")
+        try:
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.get(url, headers={"Authorization": f"Bearer {access_token}"}, params=params if params else None)
+            
+            debug_info[f"strategy1_{variation_name}_status"] = resp.status_code
+            
+            if resp.status_code == 200:
+                modifier_groups_data = resp.json()
+                modifier_groups = modifier_groups_data.get("elements") if isinstance(modifier_groups_data, dict) else (modifier_groups_data if isinstance(modifier_groups_data, list) else [])
+                debug_info["modifier_groups_found"] = [g.get("id") if isinstance(g, dict) else str(g) for g in modifier_groups] if modifier_groups else []
+                debug_info[f"strategy1_{variation_name}_success"] = True
+                debug_info[f"strategy1_{variation_name}_groups_count"] = len(modifier_groups) if isinstance(modifier_groups, list) else 0
+                
+                if modifier_groups:
+                    item_modifier_group_ids = [g.get("id") for g in modifier_groups if isinstance(g, dict) and g.get("id")]
+                    debug_info["item_has_modifier_groups"] = True
+                    break  # Found groups, stop trying variations
+            elif resp.status_code == 404:
+                debug_info[f"strategy1_{variation_name}_failure"] = "404_not_found"
+            elif resp.status_code == 405:
+                debug_info[f"strategy1_{variation_name}_failure"] = "405_method_not_allowed"
+            else:
+                debug_info[f"strategy1_{variation_name}_failure"] = f"{resp.status_code}_{resp.text[:50]}"
+        except Exception as e:
+            debug_info[f"strategy1_{variation_name}_error"] = str(e)
     
-    if resp.status_code == 200:
-        modifier_groups_data = resp.json()
-        modifier_groups = modifier_groups_data.get("elements") if isinstance(modifier_groups_data, dict) else (modifier_groups_data if isinstance(modifier_groups_data, list) else [])
-        debug_info["modifier_groups_found"] = [g.get("id") if isinstance(g, dict) else str(g) for g in modifier_groups] if modifier_groups else []
+    # If we still don't have modifier_groups, try POST method (some APIs use POST for relationships)
+    if not modifier_groups:
+        debug_info["strategies_tried"].append("items_modifier_groups_POST")
+        try:
+            url = f"{rest_host}/v3/merchants/{merchant_id}/items/{item_id}/modifier_groups"
+            async with httpx.AsyncClient(timeout=15.0) as client:
+                resp = await client.post(url, headers={"Authorization": f"Bearer {access_token}"}, json={})
+            debug_info["strategy1_POST_status"] = resp.status_code
+            if resp.status_code == 200:
+                modifier_groups_data = resp.json()
+                modifier_groups = modifier_groups_data.get("elements") if isinstance(modifier_groups_data, dict) else (modifier_groups_data if isinstance(modifier_groups_data, list) else [])
+                if modifier_groups:
+                    item_modifier_group_ids = [g.get("id") for g in modifier_groups if isinstance(g, dict) and g.get("id")]
+                    debug_info["item_has_modifier_groups"] = True
+        except Exception as e:
+            debug_info["strategy1_POST_error"] = str(e)
+    
+    # Strategy 1 results summary
+    if modifier_groups:
         debug_info["strategy1_status"] = "success"
-        debug_info["strategy1_url"] = url
-        debug_info["strategy1_response_keys"] = list(modifier_groups_data.keys()) if isinstance(modifier_groups_data, dict) else "not_a_dict"
-        
-        # If we found groups via item-specific endpoint, use those IDs
-        if modifier_groups:
-            item_modifier_group_ids = [g.get("id") for g in modifier_groups if isinstance(g, dict) and g.get("id")]
-            debug_info["item_has_modifier_groups"] = True
-            debug_info["strategy1_groups_count"] = len(modifier_groups)
-        else:
-            debug_info["strategy1_groups_count"] = 0
-            debug_info["strategy1_failure_reason"] = "Endpoint returned 200 but no modifier groups found"
-    elif resp.status_code == 404:
-        debug_info["strategy1_status"] = "failed"
-        debug_info["strategy1_url"] = url
-        debug_info["strategy1_failure_reason"] = "Endpoint returned 404 - item may not have modifier groups or endpoint doesn't exist"
-        debug_info["errors"].append(f"items/{item_id}/modifier_groups returned 404")
+        debug_info["strategy1_groups_count"] = len(modifier_groups)
     else:
-        error_text = resp.text
         debug_info["strategy1_status"] = "failed"
-        debug_info["strategy1_url"] = url
-        debug_info["strategy1_failure_reason"] = f"Endpoint returned {resp.status_code}: {error_text[:200]}"
-        debug_info["errors"].append(f"items/{item_id}/modifier_groups: {resp.status_code} - {error_text[:200]}")
-    
-    # If we found modifier groups via item-specific endpoint, we definitely have modifiers
-    # If we found modifierGroups embedded in the item, we also have modifiers
-    # If neither worked, we'll try a fallback but be more careful about it
+        debug_info["strategy1_failure_reason"] = "All endpoint variations failed - no modifier groups found via item-specific endpoints"
     
     # Now fetch modifiers for the groups we found
     groups_to_process = modifier_groups if modifier_groups else []
